@@ -541,7 +541,7 @@ const CONTROL_SHEET_STYLES = `
 
 /** Medidas del isotipo; la hoja las escala por CSS. */
 const LOGO_WIDTH = 256;
-const LOGO_HEIGHT = 246;
+const LOGO_HEIGHT = 256;
 
 const MONEY_FORMATTER = new Intl.NumberFormat('es-AR', {
   minimumFractionDigits: 2,

@@ -12,7 +12,7 @@ export default function BrandLogo({ className }: { className?: string }) {
       src="/brand/logo.png"
       alt=""
       width={256}
-      height={246}
+      height={256}
       loading="eager"
       className={cn('object-contain', className)}
     />

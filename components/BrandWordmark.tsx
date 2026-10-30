@@ -13,7 +13,7 @@ export default function BrandWordmark({ className }: { className?: string }) {
         src="/brand/logo.png"
         alt=""
         width={40}
-        height={38}
+        height={40}
         loading="eager"
         className="h-full w-auto shrink-0 object-contain"
       />
