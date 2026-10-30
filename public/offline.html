@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#2563eb" />
+    <title>Sin conexión — Sistema de Gestión de Inventario</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f8fafc;
+        --surface: #ffffff;
+        --border: #e2e8f0;
+        --text: #0f172a;
+        --muted: #475569;
+        --primary: #2563eb;
+        --primary-hover: #1d4ed8;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #020617;
+          --surface: #0f172a;
+          --border: #1e293b;
+          --text: #f8fafc;
+          --muted: #cbd5e1;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 1.5rem;
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          system-ui,
+          -apple-system,
+          'Segoe UI',
+          Roboto,
+          sans-serif;
+      }
+
+      main {
+        width: 100%;
+        max-width: 26rem;
+        padding: 2rem;
+        border: 1px solid var(--border);
+        border-radius: 1.25rem;
+        background: var(--surface);
+        box-shadow: 0 20px 50px rgb(15 23 42 / 0.12);
+        text-align: center;
+      }
+
+      .icon {
+        width: 3.5rem;
+        height: 3.5rem;
+        margin: 0 auto 1rem;
+        display: grid;
+        place-items: center;
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--primary) 12%, transparent);
+        color: var(--primary);
+        font-size: 1.75rem;
+        font-weight: 700;
+      }
+
+      h1 {
+        margin: 0 0 0.5rem;
+        font-size: 1.5rem;
+        line-height: 1.2;
+      }
+
+      p {
+        margin: 0 0 1.5rem;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+
+      button {
+        width: 100%;
+        min-height: 3rem;
+        border: 0;
+        border-radius: 0.75rem;
+        background: var(--primary);
+        color: #ffffff;
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      button:hover {
+        background: var(--primary-hover);
+      }
+
+      button:focus-visible {
+        outline: 3px solid color-mix(in srgb, var(--primary) 45%, transparent);
+        outline-offset: 2px;
+      }
+
+      .hint {
+        margin: 1rem 0 0;
+        font-size: 0.8rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="icon" aria-hidden="true">!</div>
+      <h1 id="offline-title">Sin conexión</h1>
+      <p id="offline-message">
+        No pudimos conectar con el servidor. Revisá tu conexión e intentá de nuevo.
+      </p>
+      <button id="offline-retry" type="button">Reintentar</button>
+      <p class="hint" id="offline-hint">
+        Los cambios que ya estaban abiertos en la app se guardan en el dispositivo y se sincronizan
+        cuando vuelve la conexión.
+      </p>
+    </main>
+
+    <script>
+      (function () {
+        var title = document.getElementById('offline-title');
+        var message = document.getElementById('offline-message');
+        var hint = document.getElementById('offline-hint');
+        var retry = document.getElementById('offline-retry');
+
+        // El SW reutiliza este mismo shell para las rutas de la allowlist. El
+        // pathname sigue siendo el de la navegación original, así que podemos
+        // mostrar un mensaje específico sin cachear el HTML de esa página.
+        if (window.location.pathname === '/orders/new') {
+          title.textContent = 'Alta de pedido sin conexión';
+          message.textContent =
+            'El formulario necesita conexión para cargar clientes y productos. Si ya estaba abierto, podés seguir cargando el pedido: se guarda localmente.';
+          hint.textContent =
+            'Al recuperar la conexión, el pedido pendiente se sincroniza automáticamente.';
+        }
+
+        retry.addEventListener('click', function () {
+          window.location.reload();
+        });
+      })();
+    </script>
+  </body>
+</html>

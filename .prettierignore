@@ -1,0 +1,19 @@
+# Dependencias y artefactos generados
+node_modules
+.next
+out
+build
+coverage
+
+# Salidas de tests
+playwright-report
+test-results
+blob-report
+
+# Generados / lockfiles
+next-env.d.ts
+package-lock.json
+
+# Los documentos de especificación y planes se mantienen tal cual:
+# tienen tablas, listas anidadas y bloques que Prettier reescribe de más.
+*.md

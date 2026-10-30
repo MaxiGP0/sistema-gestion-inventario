@@ -1,0 +1,77 @@
+{
+  "updatedAt": "2026-10-26",
+  "bundle": {
+    "default": {
+      "jsGzipBytes": 217088,
+      "jsBytes": 737280
+    },
+    "routes": {
+      "/login": {
+        "jsGzipBytes": 206848,
+        "jsBytes": 700000
+      },
+      "/": {
+        "jsGzipBytes": 225280,
+        "jsBytes": 720896
+      },
+      "/settings/notifications": {
+        "jsGzipBytes": 225280,
+        "jsBytes": 737280
+      },
+      "/settings/security": {
+        "jsGzipBytes": 221184,
+        "jsBytes": 720896
+      },
+      "/orders/new": {
+        "jsGzipBytes": 206848,
+        "jsBytes": 700000
+      },
+      "/deposit/orders": {
+        "jsGzipBytes": 206848,
+        "jsBytes": 700000
+      },
+      "/deposit/orders/[id]": {
+        "jsGzipBytes": 206848,
+        "jsBytes": 700000
+      }
+    }
+  },
+  "playwright": {
+    "runs": 3,
+    "routes": {
+      "/login": { "lcpMs": 1500, "inpMs": 150, "cls": 0.05, "tbtMs": 250, "ttfbMs": 250 },
+      "/": { "lcpMs": 1500, "inpMs": 150, "cls": 0.05, "tbtMs": 250, "ttfbMs": 250 },
+      "/orders/new": {
+        "lcpMs": 1500,
+        "inpMs": 150,
+        "cls": 0.05,
+        "tbtMs": 250,
+        "ttfbMs": 250
+      },
+      "/deposit/orders": {
+        "lcpMs": 1500,
+        "inpMs": 150,
+        "cls": 0.05,
+        "tbtMs": 250,
+        "ttfbMs": 250
+      },
+      "/deposit/orders/[id]": {
+        "lcpMs": 1500,
+        "inpMs": 150,
+        "cls": 0.05,
+        "tbtMs": 250,
+        "ttfbMs": 250
+      }
+    }
+  },
+  "lighthouse": {
+    "runs": 3,
+    "routes": {
+      "/login": { "lcpMs": 3500, "cls": 0.05, "tbtMs": 300 },
+      "/": { "lcpMs": 3500, "cls": 0.05, "tbtMs": 300 },
+      "/orders/new": { "lcpMs": 3500, "cls": 0.05, "tbtMs": 300 },
+      "/deposit/orders": { "lcpMs": 3500, "cls": 0.05, "tbtMs": 300 },
+      "/deposit/orders/[id]": { "lcpMs": 3500, "cls": 0.05, "tbtMs": 300 }
+    }
+  }
+}

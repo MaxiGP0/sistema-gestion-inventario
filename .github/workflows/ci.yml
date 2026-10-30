@@ -1,0 +1,167 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Auditoría de dependencias
+        run: npm audit --audit-level=moderate
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Formato
+        run: npm run format:check
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Presupuesto de JS inicial
+        run: npm run perf:bundle
+
+      - name: Analizar bundles
+        run: npm run analyze
+
+      - name: Publicar análisis de bundles
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-analysis
+          path: .next/diagnostics/analyze
+          retention-days: 7
+          if-no-files-found: ignore
+
+  performance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    needs: checks
+
+    services:
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      MONGODB_URI: mongodb://127.0.0.1:27017/sgi-e2e
+      E2E_MONGODB_URI: mongodb://127.0.0.1:27017/sgi-e2e
+      E2E_USE_EXTERNAL_MONGODB: '1'
+      AUTH_SECRET: e2e-auth-secret-sgi-0123456789
+      LOG_LEVEL: error
+      NEXT_TELEMETRY_DISABLED: '1'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Instalar Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Build
+        run: npm run build
+
+      - name: Presupuesto de JS inicial
+        run: npm run perf:bundle
+
+      - name: Sembrar base E2E
+        run: npm run seed:e2e
+
+      - name: Lighthouse CI mobile
+        run: npm run perf:lighthouse
+
+      - name: Publicar reporte Lighthouse
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-report
+          path: .lighthouseci
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Performance móvil Playwright
+        run: npm run perf:playwright:run
+
+      - name: Publicar reporte de performance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-report
+          path: |
+            playwright-report
+            test-results/performance
+          retention-days: 7
+          if-no-files-found: ignore
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: checks
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Instalar navegadores E2E
+        run: npx playwright install --with-deps chromium webkit
+
+      - name: Tests E2E
+        run: npm run test:e2e
+
+      - name: Publicar traces y reporte de Playwright
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report
+            test-results
+          retention-days: 7
+          if-no-files-found: ignore

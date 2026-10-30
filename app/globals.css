@@ -1,0 +1,331 @@
+@import 'tailwindcss';
+
+/* `dark:` se activa con el atributo `data-theme` que fija el script inline de
+   app/layout.tsx (anti-FOUC) y useDarkMode. Reemplaza al shim generado. */
+@custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
+
+:root {
+  --background: #f8fafc;
+  --foreground: #0f172a;
+  color-scheme: light;
+
+  /* Tokens del sistema de diseño (Figma 01 Foundations).
+     Los valores semánticos cambian con data-theme; los componentes usan
+     bg-surface, text-muted, border-border, etc. y no repiten dark:. */
+  --surface: #ffffff;
+  --surface-muted: #f8fafc;
+  --field: #ffffff;
+  --muted: #475569;
+  --subtle: #64748b;
+  --border: #e2e8f0;
+  --border-strong: #64748b;
+  --focus: #4f46e5;
+  --disabled-bg: #f1f5f9;
+  --disabled-fg: #64748b;
+
+  --brand: #0b0d9f;
+  --brand-soft: #eef0ff;
+  --action: #4338ca;
+  --action-hover: #3730a3;
+  --action-pressed: #312e81;
+  --action-soft: #eef2ff;
+  --action-soft-hover: #e0e7ff;
+  --action-fg: #ffffff;
+  --action-text: #4338ca;
+
+  --status-draft: #92400e;
+  --status-draft-soft: #fffbeb;
+  --status-draft-border: #d97706;
+  --status-blocked: #b91c1c;
+  --status-blocked-soft: #fef2f2;
+  --status-blocked-border: #dc2626;
+  --status-ready: #6d28d9;
+  --status-ready-soft: #f5f3ff;
+  --status-ready-border: #7c3aed;
+  --status-control: #155e75;
+  --status-control-soft: #ecfeff;
+  --status-control-border: #0891b2;
+  --status-delivered: #065f46;
+  --status-delivered-soft: #ecfdf5;
+  --status-delivered-border: #059669;
+
+  /* Safe-area de las PWAs instaladas (notch, barra de gestos, bordes
+     curvos). Se centralizan acá para que headers, toasts y barras fijas
+     compartan el mismo cálculo. */
+  --safe-area-top: env(safe-area-inset-top, 0px);
+  --safe-area-right: env(safe-area-inset-right, 0px);
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-area-left: env(safe-area-inset-left, 0px);
+
+  /* Altura libre que deja la barra fija de "Nuevo pedido" y separación
+     vertical entre los elementos flotantes inferiores. */
+  --mobile-action-bar-clearance: 5rem;
+  --mobile-sync-clearance: var(--mobile-action-bar-clearance);
+  --mobile-toast-clearance: 9rem;
+}
+
+/* En el catálogo el chip del borrador se apoya sobre la barra inferior:
+   los avisos flotantes suben por encima de ambos. */
+html[data-catalog-draft='true'] {
+  --mobile-sync-clearance: 10.5rem;
+  --mobile-toast-clearance: 14rem;
+}
+
+html[data-theme='dark'] {
+  --background: #020617;
+  --foreground: #f8fafc;
+  color-scheme: dark;
+
+  --surface: #0f172a;
+  --surface-muted: #0b1220;
+  --field: #0f172a;
+  --muted: #cbd5e1;
+  --subtle: #94a3b8;
+  --border: #1e293b;
+  --border-strong: #94a3b8;
+  --focus: #a5b4fc;
+  --disabled-bg: #1e293b;
+  --disabled-fg: #94a3b8;
+
+  --brand-soft: #20264b;
+  --action: #a5b4fc;
+  --action-hover: #c7d2fe;
+  --action-pressed: #818cf8;
+  --action-soft: #20264b;
+  --action-soft-hover: #2a3159;
+  --action-fg: #020617;
+  --action-text: #a5b4fc;
+
+  --status-draft: #fcd34d;
+  --status-draft-soft: #38280d;
+  --status-draft-border: #fcd34d;
+  --status-blocked: #fca5a5;
+  --status-blocked-soft: #3b171c;
+  --status-blocked-border: #fca5a5;
+  --status-ready: #c4b5fd;
+  --status-ready-soft: #2e1e46;
+  --status-ready-border: #c4b5fd;
+  --status-control: #67e8f9;
+  --status-control-soft: #10323c;
+  --status-control-border: #67e8f9;
+  --status-delivered: #6ee7b7;
+  --status-delivered-soft: #0d332a;
+  --status-delivered-border: #6ee7b7;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-field: var(--field);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-focus: var(--focus);
+  --color-disabled: var(--disabled-bg);
+  --color-disabled-fg: var(--disabled-fg);
+
+  --color-brand: var(--brand);
+  --color-brand-soft: var(--brand-soft);
+  --color-action: var(--action);
+  --color-action-hover: var(--action-hover);
+  --color-action-pressed: var(--action-pressed);
+  --color-action-soft: var(--action-soft);
+  --color-action-soft-hover: var(--action-soft-hover);
+  --color-action-fg: var(--action-fg);
+  --color-action-text: var(--action-text);
+
+  --color-status-draft: var(--status-draft);
+  --color-status-draft-soft: var(--status-draft-soft);
+  --color-status-draft-border: var(--status-draft-border);
+  --color-status-blocked: var(--status-blocked);
+  --color-status-blocked-soft: var(--status-blocked-soft);
+  --color-status-blocked-border: var(--status-blocked-border);
+  --color-status-ready: var(--status-ready);
+  --color-status-ready-soft: var(--status-ready-soft);
+  --color-status-ready-border: var(--status-ready-border);
+  --color-status-control: var(--status-control);
+  --color-status-control-soft: var(--status-control-soft);
+  --color-status-control-border: var(--status-control-border);
+  --color-status-delivered: var(--status-delivered);
+  --color-status-delivered-soft: var(--status-delivered-soft);
+  --color-status-delivered-border: var(--status-delivered-border);
+
+  --font-sans:
+    var(--font-inter), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    sans-serif;
+  --font-mono:
+    var(--font-ibm-plex-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono',
+    monospace;
+
+  --shadow-elevation-1: 0 8px 24px 0 rgba(2, 6, 23, 0.15);
+  --shadow-elevation-2: 0 8px 24px 0 rgba(0, 0, 0, 0.4);
+}
+
+@theme {
+  /* Animaciones propias (Tailwind 4 no incluye `animate-in` ni sus utilidades
+     de entrada). Reemplazan a las clases de `tailwindcss-animate` que se
+     usaban sin plugin instalado. */
+  --animate-fade-in: fade-in 150ms ease-out both;
+  --animate-pop-in: pop-in 150ms ease-out both;
+  --animate-slide-in-top: slide-in-top 150ms ease-out both;
+  --animate-sheet-in-top: sheet-in-top 200ms ease-out both;
+  --animate-sheet-in-bottom: sheet-in-bottom 200ms ease-out both;
+  --animate-toast-in: toast-in 300ms ease-out both;
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes pop-in {
+    from {
+      opacity: 0;
+      transform: scale(0.95);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  @keyframes slide-in-top {
+    from {
+      opacity: 0;
+      transform: translateY(-0.5rem);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes sheet-in-top {
+    from {
+      opacity: 0;
+      transform: translateY(-100%);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes sheet-in-bottom {
+    from {
+      opacity: 0;
+      transform: translateY(100%);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes toast-in {
+    from {
+      opacity: 0;
+      transform: translateY(1.25rem);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+
+/* Respeta la preferencia del sistema de reducir movimiento. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-in,
+  .animate-pop-in,
+  .animate-slide-in-top,
+  .animate-sheet-in-top,
+  .animate-sheet-in-bottom,
+  .animate-toast-in {
+    animation: none;
+  }
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  /* La barra vertical reserva su espacio: al abrir/cerrar una bandeja o al
+     cambiar la altura de una lista larga el contenido no se corre. */
+  scrollbar-gutter: stable;
+}
+
+/* Render diferido de listas largas.
+   `content-visibility: auto` omite layout/pintura de lo que está fuera del
+   viewport y `contain-intrinsic-size: auto <alto>` reserva un alto estimado
+   hasta la primera pintura; después recuerda el alto real, así el scroll no
+   salta cuando el usuario sube o baja. No reemplaza a la virtualización: el
+   DOM sigue existiendo, pero deja de costar pintura. */
+.cv-list-item {
+  content-visibility: auto;
+  contain-intrinsic-size: auto var(--cv-size, 16rem);
+}
+
+.cv-order-card {
+  --cv-size: 17rem;
+}
+
+.cv-product-card {
+  --cv-size: 13rem;
+}
+
+.cv-table-row {
+  --cv-size: 3.5rem;
+}
+
+.cv-notification-item {
+  --cv-size: 5.5rem;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+}
+
+/* Ergonomía móvil (<= 767 px).
+   - El zoom automático de iOS se dispara cuando el campo enfocado mide menos
+     de 16 px. `.text-xs` gana por especificidad, así que la corrección va con
+     `!important` y ajusta el padding vertical para no perder densidad.
+   - `touch-action: manipulation` elimina el retardo de 300 ms sin bloquear el
+     pinch-zoom de accesibilidad.
+   - El clip horizontal es una red de seguridad: cada pantalla sigue siendo
+     responsable de no generar contenido más ancho que el viewport. */
+@media (max-width: 767px) {
+  html,
+  body {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: clip;
+  }
+
+  input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='file']):not(
+      [type='color']
+    ):not([type='button']):not([type='submit']):not([type='reset']):not([readonly]):not([disabled]),
+  select:not([disabled]),
+  textarea:not([readonly]):not([disabled]) {
+    font-size: 16px !important;
+    line-height: 1.25 !important;
+    padding-block: 0.4375rem !important;
+  }
+
+  button,
+  a,
+  [role='button'],
+  input,
+  select,
+  textarea,
+  summary {
+    touch-action: manipulation;
+  }
+}

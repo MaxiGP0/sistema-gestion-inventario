@@ -1,0 +1,43 @@
+name: Notifications cleanup
+
+on:
+  schedule:
+    # UTC. 03:15 UTC = 00:15 en Argentina (UTC-3).
+    - cron: '15 3 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Solo contar huérfanos, sin borrar'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: notifications-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Limpiar NotificationRead huérfanos
+        run: npm run notifications:cleanup -- ${{ inputs.dry_run && '--dry-run' || '' }}
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
