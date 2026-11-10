@@ -1,7 +1,7 @@
 import { Suspense } from 'react';
 import OrderDetailSkeleton from '@/components/orders/OrderDetailSkeleton';
 import VendorOrderDetail from '@/components/orders/VendorOrderDetail';
-import { requireRolePage } from '@/lib/auth-page';
+import { requireCurrentRolePage } from '@/lib/auth-page';
 import { initialOrderErrorForStatus } from '@/lib/order-initial-data';
 import { getOrderForSession } from '@/lib/services/order-read';
 
@@ -15,13 +15,14 @@ export default function MyOrderDetailPage({ params }: { params: Promise<{ id: st
 }
 
 async function MyOrderDetailContent({ params }: { params: Promise<{ id: string }> }) {
-  const session = await requireRolePage(['admin', 'vendedor']);
+  const session = await requireCurrentRolePage(['admin', 'vendedor']);
   const { id } = await params;
   const result = await getOrderForSession(session, id);
 
   return (
     <VendorOrderDetail
       orderId={id}
+      userId={session.userId}
       role={session.role}
       username={session.username}
       initialOrder={result.ok ? result.order : null}

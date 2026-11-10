@@ -3,7 +3,7 @@ import Link from 'next/link';
 import Card from '@/components/ui/Card';
 import NewOrderClient from '@/components/orders/new/NewOrderClient';
 import NewOrderPageSkeleton from '@/app/orders/new/NewOrderPageSkeleton';
-import { requireRolePage } from '@/lib/auth-page';
+import { requireCurrentRolePage } from '@/lib/auth-page';
 import { getBrands, getClients, getProducts } from '@/lib/catalog';
 import { getOrderForSession } from '@/lib/services/order-read';
 import { DRAFT_EDIT_BLOCKED_ERROR, isDraftOrderIntact } from '@/lib/services/orders';
@@ -25,7 +25,7 @@ export default function EditOrderPage({ params }: { params: Promise<{ id: string
 }
 
 async function EditOrderContent({ params }: { params: Promise<{ id: string }> }) {
-  const session = await requireRolePage(['admin', 'vendedor']);
+  const session = await requireCurrentRolePage(['admin', 'vendedor']);
   const { id } = await params;
   const result = await getOrderForSession(session, id);
 

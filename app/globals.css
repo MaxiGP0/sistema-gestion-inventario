@@ -57,18 +57,71 @@
   --safe-area-bottom: env(safe-area-inset-bottom, 0px);
   --safe-area-left: env(safe-area-inset-left, 0px);
 
-  /* Altura libre que deja la barra fija de "Nuevo pedido" y separación
-     vertical entre los elementos flotantes inferiores. */
-  --mobile-action-bar-clearance: 5rem;
-  --mobile-sync-clearance: var(--mobile-action-bar-clearance);
+  /* Capas de los avisos flotantes inferiores en mobile.
+     La barra de acción (o el bottom nav) es la base y cada aviso se apoya
+     sobre la capa que ya ocupa el borde inferior. Las posiciones se
+     recalculan con los atributos `data-*` de <html> para que cuatro avisos
+     simultáneos nunca se superpongan. */
+  --mobile-bottom-bar-clearance: 5rem;
+  --mobile-sync-clearance: var(--mobile-bottom-bar-clearance);
+  --mobile-tray-chip-clearance: 4.5rem;
+  --mobile-sw-clearance: var(--mobile-bottom-bar-clearance);
   --mobile-toast-clearance: 9rem;
+
+  /* Alturas de referencia y aire entre capas (mobile). */
+  --mobile-sync-notice-height: 3.5rem;
+  --mobile-tray-chip-height: 2.75rem;
+  --mobile-sw-update-height: 8.75rem;
+  --mobile-stack-gap: 0.5rem;
+
+  /* Alias histórico del alta/edición de pedidos. */
+  --mobile-action-bar-clearance: var(--mobile-bottom-bar-clearance);
 }
 
 /* En el catálogo el chip del borrador se apoya sobre la barra inferior:
    los avisos flotantes suben por encima de ambos. */
 html[data-catalog-draft='true'] {
   --mobile-sync-clearance: 10.5rem;
+  --mobile-sw-clearance: 8.5rem;
   --mobile-toast-clearance: 14rem;
+}
+
+/* Con un pedido pendiente visible, el indicador global ocupa la primera capa
+   libre. El chip de movimientos, la actualización del SW y el toast suben una
+   capa cada uno en vez de compartir la misma coordenada. */
+html[data-offline-sync-visible='true'] {
+  --mobile-tray-chip-clearance: calc(
+    var(--mobile-sync-clearance) + var(--mobile-sync-notice-height) + var(--mobile-stack-gap)
+  );
+  --mobile-sw-clearance: calc(
+    var(--mobile-sync-clearance) + var(--mobile-sync-notice-height) + var(--mobile-stack-gap)
+  );
+  --mobile-toast-clearance: max(
+    9rem,
+    calc(var(--mobile-sync-clearance) + var(--mobile-sync-notice-height) + var(--mobile-stack-gap))
+  );
+}
+
+/* Si además está visible el chip de "Nuevos movimientos", el SW y el toast
+   se apoyan por encima del chip, no sobre el indicador offline. */
+html[data-tray-chip-visible='true'] {
+  --mobile-sw-clearance: calc(
+    var(--mobile-tray-chip-clearance) + var(--mobile-tray-chip-height) + var(--mobile-stack-gap)
+  );
+  --mobile-toast-clearance: max(
+    9rem,
+    calc(
+      var(--mobile-tray-chip-clearance) + var(--mobile-tray-chip-height) + var(--mobile-stack-gap)
+    )
+  );
+}
+
+/* El aviso de actualización del SW es una tarjeta más alta: cuando coincide
+   con el toast, este último se apoya siempre por encima suyo. */
+html[data-sw-update-visible='true'] {
+  --mobile-toast-clearance: calc(
+    var(--mobile-sw-clearance) + var(--mobile-sw-update-height) + var(--mobile-stack-gap)
+  );
 }
 
 html[data-theme='dark'] {
@@ -275,6 +328,22 @@ html {
   --cv-size: 17rem;
 }
 
+.cv-deposit-card {
+  --cv-size: 15rem;
+}
+
+.cv-billing-card {
+  --cv-size: 12rem;
+}
+
+.cv-vendor-card {
+  --cv-size: 10rem;
+}
+
+.cv-client-card {
+  --cv-size: 9rem;
+}
+
 .cv-product-card {
   --cv-size: 13rem;
 }
@@ -285,6 +354,14 @@ html {
 
 .cv-notification-item {
   --cv-size: 5.5rem;
+}
+
+/* La tarjeta con foco o fijada por el filtro se pinta completa: el input
+   enfocado nunca queda dentro de un subárbol omitido y el scroll no salta
+   cuando `content-visibility: auto` reanuda su layout. */
+.cv-list-item:focus-within,
+.cv-list-item.cv-pinned {
+  content-visibility: visible;
 }
 
 body {

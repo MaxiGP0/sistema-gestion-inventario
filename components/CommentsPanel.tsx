@@ -1,5 +1,6 @@
 'use client';
 
+import type { RefObject } from 'react';
 import { MessageSquare } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import Card from '@/components/ui/Card';
@@ -49,6 +50,8 @@ interface CommentsPanelProps {
   onSubmit?: () => void;
   /** Deshabilita el botón mientras la acción está en curso. */
   submitting?: boolean;
+  /** Permite que el detalle enfoque el campo desde un atajo de respuesta. */
+  textareaRef?: RefObject<HTMLTextAreaElement | null>;
 }
 
 /**
@@ -63,6 +66,7 @@ export default function CommentsPanel({
   variant,
   onSubmit,
   submitting = false,
+  textareaRef,
 }: CommentsPanelProps) {
   const styles = PANEL_STYLES[variant];
 
@@ -97,10 +101,12 @@ export default function CommentsPanel({
 
   const textarea = (
     <textarea
+      ref={textareaRef}
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder="Escribe un comentario u observación..."
       rows={2}
+      data-testid="comment-textarea"
       className={cn(controlClasses, 'min-h-20 resize-none')}
     />
   );

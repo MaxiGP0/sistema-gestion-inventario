@@ -186,12 +186,12 @@ export async function getProducts({
   if (normalizedSearch) {
     const brandFilter = buildBrandSearchFilter(normalizedSearch);
     const matchingBrands = brandFilter
-      ? ((await Brand.find(brandFilter).select('_id').lean()) as unknown as { _id: unknown }[])
+      ? ((await Brand.find(brandFilter).select('_id name').lean()) as unknown as {
+          _id: unknown;
+          name: string;
+        }[])
       : [];
-    const searchFilter = buildProductSearchFilter(
-      normalizedSearch,
-      matchingBrands.map((brand) => brand._id),
-    );
+    const searchFilter = buildProductSearchFilter(normalizedSearch, matchingBrands);
     if (searchFilter) Object.assign(query, searchFilter);
   }
 

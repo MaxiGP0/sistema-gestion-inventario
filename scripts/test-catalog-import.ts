@@ -11,7 +11,7 @@
  * - Clientes: el encabezado DescuentoGeneral normaliza a "descuentogeneral"
  *   y no coincidía con ninguna clave: el descuento se guardaba en 0 en
  *   silencio.
- * - Marcas: "Bagó" y "BAGO" deben resolver a la misma marca; el preview no
+ * - Marcas: "DermaPlus" y "DERMAPLUS" deben resolver a la misma marca; el preview no
  *   debe crear marcas ni ejecutar bulkWrite.
  *
  * No requiere base de datos: se deja una conexión mongoose cacheada falsa,
@@ -28,6 +28,7 @@ import ExcelJS from 'exceljs';
 import { Brand } from '../models/Brand';
 import { Client } from '../models/Client';
 import { Product } from '../models/Product';
+import { API_RATE_LIMIT_RULES, resetApiRateLimits } from '../lib/api-rate-limit';
 import { authRequest } from './test-auth-utils';
 
 const oid = () => new mongoose.Types.ObjectId();
@@ -229,6 +230,7 @@ before(async () => {
 });
 
 beforeEach(() => {
+  resetApiRateLimits();
   setBrands(['General']);
   existingProducts = [];
   brandInsertCalls = [];
@@ -246,7 +248,7 @@ test('el import de productos upsertea por bulkWrite con los precios del Excel', 
       Codigo: 'P2',
       Nombre: 'Producto Dos',
       'Precio C/IVA': 24.2,
-      Imagen: 'http://img/2.png',
+      Imagen: '/uploads/2.png',
     },
   ]);
   const payload = await response.json();
@@ -276,13 +278,13 @@ test('el import de productos upsertea por bulkWrite con los precios del Excel', 
   assert.equal(firstUpdate.$setOnInsert.active, true);
   assert.equal(firstUpdate.$setOnInsert.imageUrl, undefined);
   assert.equal(secondUpdate.$setOnInsert.active, true);
-  assert.equal(secondUpdate.$setOnInsert.imageUrl, 'http://img/2.png');
+  assert.equal(secondUpdate.$setOnInsert.imageUrl, '/uploads/2.png');
   assert.deepEqual(
     { code: first.code, name: first.name, price: first.price, priceWithIva: first.priceWithIva },
     { code: 'P1', name: 'Producto Uno', price: 10, priceWithIva: 12.1 },
   );
-  assert.deepEqual(first.searchTokens, ['p1', 'producto', 'uno']);
-  assert.deepEqual(second.searchTokens, ['p2', 'producto', 'dos']);
+  assert.deepEqual(first.searchTokens, ['p1', 'producto', 'uno', 'general']);
+  assert.deepEqual(second.searchTokens, ['p2', 'producto', 'dos', 'general']);
   assert.deepEqual(
     {
       code: second.code,
@@ -303,6 +305,25 @@ test('el import de productos upsertea por bulkWrite con los precios del Excel', 
   assert.match(payload.message, /0 actualizado\(s\) y 2 creado\(s\)/);
 });
 
+test('el import incluye el nombre de la marca en searchTokens', async () => {
+  setBrands(['BioSalud']);
+
+  const response = await importProducts([
+    {
+      Marca: 'BioSalud',
+      Codigo: 'JAB-400',
+      Nombre: 'Jabón Líquido 400ml',
+      'Precio S/IVA': 10,
+    },
+  ]);
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.count, 1);
+  const set = bulkWriteOps[0].updateOne.update.$set;
+  assert.deepEqual(set.searchTokens, ['jab', '400', 'jabon', 'liquido', '400ml', 'biosalud']);
+});
+
 test('el modo precio actualiza solo precios y conserva nombre, búsqueda, imagen y estado', async () => {
   seedProduct({
     brandName: 'General',
@@ -310,7 +331,7 @@ test('el modo precio actualiza solo precios y conserva nombre, búsqueda, imagen
     name: 'Nombre original',
     price: 10,
     priceWithIva: 12.1,
-    imageUrl: 'http://img/original.png',
+    imageUrl: '/uploads/original.png',
     active: false,
   });
 
@@ -357,7 +378,7 @@ test('el modo precio actualiza solo precios y conserva nombre, búsqueda, imagen
     },
     {
       name: 'Nombre original',
-      imageUrl: 'http://img/original.png',
+      imageUrl: '/uploads/original.png',
       active: false,
     },
   );
@@ -429,7 +450,7 @@ test('el modo nombre actualiza nombre y búsqueda sin tocar precios, imagen ni e
     name: 'Nombre original',
     price: 10,
     priceWithIva: 12.1,
-    imageUrl: 'http://img/original.png',
+    imageUrl: '/uploads/original.png',
     active: false,
   });
 
@@ -464,7 +485,7 @@ test('el modo nombre actualiza nombre y búsqueda sin tocar precios, imagen ni e
     'solo se actualizan el nombre y los campos de búsqueda',
   );
   assert.equal(operation.update.$set.name, 'Nombre Nuevo');
-  assert.deepEqual(operation.update.$set.searchTokens, ['p1', 'nombre', 'nuevo']);
+  assert.deepEqual(operation.update.$set.searchTokens, ['p1', 'nombre', 'nuevo', 'general']);
   assert.equal(operation.update.$setOnInsert.active, true);
   assert.equal(operation.update.$setOnInsert.imageUrl, undefined);
   assert.equal(existingProducts[0].price, 10);
@@ -529,7 +550,7 @@ test('el modo ambos actualiza nombre y precios y conserva imagen y estado del ex
     name: 'Nombre original',
     price: 10,
     priceWithIva: 12.1,
-    imageUrl: 'http://img/original.png',
+    imageUrl: '/uploads/original.png',
     active: false,
   });
 
@@ -540,7 +561,7 @@ test('el modo ambos actualiza nombre y precios y conserva imagen y estado del ex
         Codigo: 'P1',
         Nombre: 'Nombre Actualizado',
         'Precio S/IVA': 30,
-        Imagen: 'http://img/nueva.png',
+        Imagen: '/uploads/nueva.png',
       },
     ],
     { updateMode: 'both' },
@@ -566,9 +587,9 @@ test('el modo ambos actualiza nombre y precios y conserva imagen y estado del ex
   assert.equal(operation.update.$set.imageUrl, undefined);
   assert.equal(operation.update.$set.active, undefined);
   assert.equal(operation.update.$setOnInsert.active, true);
-  assert.equal(operation.update.$setOnInsert.imageUrl, 'http://img/nueva.png');
+  assert.equal(operation.update.$setOnInsert.imageUrl, '/uploads/nueva.png');
   assert.equal(existingProducts[0].active, false);
-  assert.equal(existingProducts[0].imageUrl, 'http://img/original.png');
+  assert.equal(existingProducts[0].imageUrl, '/uploads/original.png');
 });
 
 test('el modo ambos crea productos nuevos con imagen, estado activo y búsqueda', async () => {
@@ -580,7 +601,7 @@ test('el modo ambos crea productos nuevos con imagen, estado activo y búsqueda'
       Codigo: 'NEW-1',
       Nombre: 'Producto Nuevo',
       'Precio S/IVA': 50,
-      Imagen: 'http://img/nuevo.png',
+      Imagen: '/uploads/nuevo.png',
     },
   ]);
   const payload = await response.json();
@@ -595,9 +616,16 @@ test('el modo ambos crea productos nuevos con imagen, estado activo y búsqueda'
   assert.equal(operation.update.$set.name, 'Producto Nuevo');
   assert.equal(operation.update.$set.price, 50);
   assert.equal(operation.update.$set.priceWithIva, 60.5);
-  assert.deepEqual(operation.update.$set.searchTokens, ['new', '1', 'producto', 'nuevo']);
+  assert.deepEqual(operation.update.$set.searchTokens, [
+    'new',
+    '1',
+    'producto',
+    'nuevo',
+    'marca',
+    'nueva',
+  ]);
   assert.equal(operation.update.$setOnInsert.active, true);
-  assert.equal(operation.update.$setOnInsert.imageUrl, 'http://img/nuevo.png');
+  assert.equal(operation.update.$setOnInsert.imageUrl, '/uploads/nuevo.png');
   assert.equal(operation.update.$set.active, undefined);
   assert.equal(operation.update.$set.imageUrl, undefined);
 });
@@ -800,14 +828,14 @@ test('el preview devuelve como máximo 50 errores pero cuenta todos', async () =
   assert.equal(bulkWriteOps.length, 0);
 });
 
-test('normaliza marcas y resuelve "Bagó" sin duplicar BAGO', async () => {
-  setBrands(['General', 'Bagó']);
-  const bagoId = brandIdOf('Bagó');
+test('normaliza marcas y resuelve "DermaPlus" sin duplicar DERMAPLUS', async () => {
+  setBrands(['General', 'DermaPlus']);
+  const dermaplusId = brandIdOf('DermaPlus');
 
   const response = await importProducts([
-    { Marca: ' Bagó ', Codigo: 'B1', Nombre: 'Producto Bagó 1', 'Precio S/IVA': 10 },
-    { Marca: 'BAGO', Codigo: 'B2', Nombre: 'Producto Bagó 2', 'Precio S/IVA': 10 },
-    { Marca: 'bago', Codigo: 'B3', Nombre: 'Producto Bagó 3', 'Precio S/IVA': 10 },
+    { Marca: ' DermaPlus ', Codigo: 'B1', Nombre: 'Producto DermaPlus 1', 'Precio S/IVA': 10 },
+    { Marca: 'DERMAPLUS', Codigo: 'B2', Nombre: 'Producto DermaPlus 2', 'Precio S/IVA': 10 },
+    { Marca: 'dermaplus', Codigo: 'B3', Nombre: 'Producto DermaPlus 3', 'Precio S/IVA': 10 },
   ]);
   const payload = await response.json();
 
@@ -823,7 +851,7 @@ test('normaliza marcas y resuelve "Bagó" sin duplicar BAGO', async () => {
   for (const op of bulkWriteOps) {
     assert.equal(
       String(op.updateOne.filter.brandId),
-      String(bagoId),
+      String(dermaplusId),
       'todas las variantes deben apuntar a la marca existente',
     );
   }
@@ -831,16 +859,16 @@ test('normaliza marcas y resuelve "Bagó" sin duplicar BAGO', async () => {
 
 test('crea una sola marca cuando el archivo trae variantes nuevas de la misma', async () => {
   const response = await importProducts([
-    { Marca: ' Bagó ', Codigo: 'N1', Nombre: 'Nuevo 1', 'Precio S/IVA': 10 },
-    { Marca: 'BAGO', Codigo: 'N2', Nombre: 'Nuevo 2', 'Precio S/IVA': 10 },
+    { Marca: ' DermaPlus ', Codigo: 'N1', Nombre: 'Nuevo 1', 'Precio S/IVA': 10 },
+    { Marca: 'DERMAPLUS', Codigo: 'N2', Nombre: 'Nuevo 2', 'Precio S/IVA': 10 },
   ]);
   const payload = await response.json();
 
   assert.equal(response.status, 200);
   assert.equal(payload.count, 2);
-  assert.deepEqual(brandInsertCalls, [['BAGO']]);
-  assert.equal(brands.filter((brand) => brand.name === 'BAGO').length, 1);
-  assert.equal(brands.filter((brand) => brand.name === 'Bagó').length, 0);
+  assert.deepEqual(brandInsertCalls, [['DERMAPLUS']]);
+  assert.equal(brands.filter((brand) => brand.name === 'DERMAPLUS').length, 1);
+  assert.equal(brands.filter((brand) => brand.name === 'DermaPlus').length, 0);
 });
 
 test('rechaza descuentos generales fuera de 0-100 o no numéricos', async () => {
@@ -883,8 +911,8 @@ test('rechaza descuentos generales fuera de 0-100 o no numéricos', async () => 
 
 test('reporta códigos duplicados dentro del archivo y no los importa dos veces', async () => {
   const rows = [
-    { Marca: 'Bagó', Codigo: 'DUP', Nombre: 'Primero', 'Precio S/IVA': 10 },
-    { Marca: 'BAGO', Codigo: 'DUP', Nombre: 'Segundo', 'Precio S/IVA': 20 },
+    { Marca: 'DermaPlus', Codigo: 'DUP', Nombre: 'Primero', 'Precio S/IVA': 10 },
+    { Marca: 'DERMAPLUS', Codigo: 'DUP', Nombre: 'Segundo', 'Precio S/IVA': 20 },
     { Marca: 'General', Codigo: 'OK', Nombre: 'Tercero', 'Precio S/IVA': 30 },
   ];
 
@@ -910,6 +938,32 @@ test('reporta códigos duplicados dentro del archivo y no los importa dos veces'
   assert.equal(payload.count, 2);
   assert.equal(payload.skipped, 1);
   assert.equal(bulkWriteOps.length, 2, 'el duplicado no debe generar un segundo upsert');
+});
+
+test('la importación N+1 responde 429 con Retry-After y no escribe', async () => {
+  const { limit } = API_RATE_LIMIT_RULES.catalogImport;
+
+  for (let attempt = 0; attempt < limit; attempt += 1) {
+    const response = await importClients(
+      [{ Codigo: `RL${attempt}`, Nombre: 'Cliente válido', DescuentoGeneral: 0 }],
+      { dryRun: true },
+    );
+    assert.equal(response.status, 200, `la solicitud ${attempt + 1} debe pasar`);
+  }
+
+  const response = await importClients(
+    [{ Codigo: 'RL-BLOQUEADO', Nombre: 'No debe importarse', DescuentoGeneral: 0 }],
+    { dryRun: true },
+  );
+  assert.equal(response.status, 429);
+
+  const retryAfter = Number(response.headers.get('retry-after'));
+  assert.ok(
+    retryAfter > 0 && retryAfter <= Math.ceil(API_RATE_LIMIT_RULES.catalogImport.windowMs / 1000),
+    `Retry-After fuera de rango: ${retryAfter}`,
+  );
+  assert.match((await response.json()).error, /Demasiadas solicitudes/i);
+  assert.equal(clientBulkWriteOps.length, 0, 'la solicitud bloqueada no debe escribir');
 });
 
 test('rechaza un archivo con más de 5000 filas en vez de importarlo parcialmente', async () => {
@@ -963,6 +1017,67 @@ test('importa productos desde CSV con exceljs', async () => {
   assert.deepEqual(
     { code: set.code, name: set.name, price: set.price, priceWithIva: set.priceWithIva },
     { code: 'CSV1', name: 'Producto CSV', price: 15, priceWithIva: 18.15 },
+  );
+});
+
+test('valida la URL de imagen por fila sin abortar la importación', async () => {
+  const rows = [
+    {
+      Marca: 'General',
+      Codigo: 'IMG-LOCAL',
+      Nombre: 'Imagen local',
+      'Precio S/IVA': 10,
+      Imagen: '/uploads/foto.png',
+    },
+    {
+      Marca: 'General',
+      Codigo: 'IMG-HTTPS',
+      Nombre: 'Imagen HTTPS',
+      'Precio S/IVA': 10,
+      Imagen: 'https://inventario.example.com/foto.png',
+    },
+    {
+      Marca: 'General',
+      Codigo: 'IMG-JS',
+      Nombre: 'Esquema ejecutable',
+      'Precio S/IVA': 10,
+      Imagen: 'javascript:alert(1)',
+    },
+    {
+      Marca: 'General',
+      Codigo: 'IMG-DATA',
+      Nombre: 'Data URL',
+      'Precio S/IVA': 10,
+      Imagen: 'data:image/png;base64,AAAA',
+    },
+  ];
+
+  const previewResponse = await importProducts(rows, { dryRun: true });
+  const preview = await previewResponse.json();
+
+  assert.equal(previewResponse.status, 200);
+  assert.equal(preview.total, 4);
+  assert.equal(preview.valid, 2);
+  assert.equal(preview.skipped, 2);
+  const imageErrors = preview.errors.filter((error: any) => error.field === 'imagen');
+  assert.equal(imageErrors.length, 2);
+  assert.deepEqual(
+    imageErrors.map((error: any) => error.row),
+    [4, 5],
+  );
+  assert.match(imageErrors[0].reason, /URL de imagen/);
+  assert.equal(bulkWriteOps.length, 0, 'el preview no debe escribir productos');
+
+  const response = await importProducts(rows);
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.count, 2);
+  assert.equal(payload.skipped, 2);
+  assert.equal(bulkWriteOps.length, 2);
+  assert.deepEqual(
+    bulkWriteOps.map((op) => op.updateOne.update.$setOnInsert.imageUrl),
+    ['/uploads/foto.png', 'https://inventario.example.com/foto.png'],
   );
 });
 

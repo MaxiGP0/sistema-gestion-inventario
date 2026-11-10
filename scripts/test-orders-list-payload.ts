@@ -73,7 +73,7 @@ const fullOrder: any = {
       _id: itemId,
       productId, // referencia sin poblar
       productCode: 'P1',
-      productName: 'Shampoo Capitalis',
+      productName: 'Shampoo NovaFarma',
       unitPrice: 100,
       requestedQuantity: 3,
       verifiedQuantity: 1,
@@ -86,7 +86,7 @@ const fullOrder: any = {
       _id: secondItemId,
       productId,
       productCode: 'P2',
-      productName: 'Acondicionador Capitalis',
+      productName: 'Acondicionador NovaFarma',
       unitPrice: 100,
       requestedQuantity: 2,
       verifiedQuantity: 2,
@@ -113,6 +113,7 @@ const fullOrder: any = {
   createdBy: 'vendedor',
   invoiceType: 'A',
   paymentCondition: 'contado',
+  paymentConditionDetail: 'Cheque a 30 días',
   comments: [
     {
       text: 'Primer comentario que no debe viajar al listado',
@@ -309,6 +310,7 @@ test('GET /api/orders devuelve el contexto liviano de la tarjeta sin poblar prod
     'invoiceType',
     'items',
     'paymentCondition',
+    'paymentConditionDetail',
     'status',
     'version',
   ]);
@@ -317,6 +319,7 @@ test('GET /api/orders devuelve el contexto liviano de la tarjeta sin poblar prod
   assert.equal(order.version, 0);
   assert.equal(order.invoiceType, 'A');
   assert.equal(order.paymentCondition, 'contado');
+  assert.equal(order.paymentConditionDetail, 'Cheque a 30 días');
 
   // El cliente viaja sólo con los campos de la tarjeta.
   assert.deepEqual(Object.keys(order.clientId).sort(), [
@@ -330,19 +333,21 @@ test('GET /api/orders devuelve el contexto liviano de la tarjeta sin poblar prod
   assert.equal(order.clientId.generalDiscount, undefined);
   assert.equal(order.clientId.brandDiscounts, undefined);
 
-  // Las líneas traen snapshots y cantidades, pero nunca el producto poblado.
+  // Las líneas traen la referencia escalar al producto (sin populate) y los
+  // snapshots/cantidades que ya usan las tarjetas.
   assert.equal(order.items.length, 3);
   assert.deepEqual(Object.keys(order.items[0]).sort(), [
     '_id',
     'isPending',
     'pendingReason',
     'productCode',
+    'productId',
     'productName',
     'requestedQuantity',
     'verifiedQuantity',
   ]);
-  assert.equal(order.items[0].productId, undefined);
-  assert.equal(order.items[0].productName, 'Shampoo Capitalis');
+  assert.equal(order.items[0].productId, String(productId));
+  assert.equal(order.items[0].productName, 'Shampoo NovaFarma');
   assert.equal(order.items[0].isPending, true);
   assert.equal(order.items[0].pendingReason, 'Sin stock en depósito');
 
@@ -353,7 +358,7 @@ test('GET /api/orders devuelve el contexto liviano de la tarjeta sin poblar prod
   // La tarjeta puede armar el adelanto, el faltante y el comentario con este DTO.
   assert.equal(
     buildOrderProductPreview(order),
-    '3x Shampoo Capitalis · 2x Acondicionador Capitalis (+1 más)',
+    '3x Shampoo NovaFarma · 2x Acondicionador NovaFarma (+1 más)',
   );
   assert.deepEqual(getOrderPendingSummary(order), {
     count: 1,
@@ -374,7 +379,7 @@ test('GET /api/orders no populea items.productId y reduce el select del cliente'
 
   assert.equal(
     capture.select,
-    'clientId clientName clientCode status finalTotal createdBy createdAt archived version invoiceType paymentCondition items._id items.productName items.productCode items.requestedQuantity items.verifiedQuantity items.isPending items.pendingReason comments',
+    'clientId clientName clientCode status finalTotal createdBy createdAt archived version invoiceType paymentCondition paymentConditionDetail items._id items.productId items.productName items.productCode items.requestedQuantity items.verifiedQuantity items.isPending items.pendingReason comments',
   );
   assert.deepEqual(capture.slice, { path: 'comments', value: -1 });
   assert.equal(capture.populates.length, 1);
@@ -401,8 +406,13 @@ test('GET /api/orders con búsqueda usa searchTokens y no pre-consulta Client', 
   assert.equal(capture.findQuery.status, 'borrador');
   assert.ok(capture.findQuery.createdAt.$gte instanceof Date, 'mantiene el filtro de fecha desde');
   assert.ok(capture.findQuery.createdAt.$lte instanceof Date, 'mantiene el filtro de fecha hasta');
-  assert.equal(json.orders[0].items[0].productName, 'Shampoo Capitalis');
-  assert.ok(!('productId' in json.orders[0].items[0]), 'la búsqueda tampoco puebla productos');
+  assert.equal(json.orders[0].items[0].productName, 'Shampoo NovaFarma');
+  assert.equal(
+    json.orders[0].items[0].productId,
+    String(productId),
+    'la referencia viaja escalar, nunca poblada',
+  );
+  assert.equal(typeof json.orders[0].items[0].productId, 'string');
   assert.equal(json.orders[0].comments.length, 1);
 });
 
@@ -588,4 +598,26 @@ test('GET /api/orders normaliza page/limit inválidos y los acota a 1..500', asy
   assert.equal(capture.limit, 500);
   assert.equal(json.pagination.page, 1);
   assert.equal(json.pagination.limit, 500);
+});
+
+test('GET /api/orders responde 400 ante status o fechas inválidas sin consultar la base', async () => {
+  countCalls = 0;
+
+  const invalidStatus = await listOrders('?status=borrador,aprobado');
+  assert.equal(invalidStatus.status, 400);
+  assert.match(invalidStatus.json.error, /estado/i);
+
+  const invalidDate = await listOrders('?startDate=no-es-fecha');
+  assert.equal(invalidDate.status, 400);
+  assert.match(invalidDate.json.error, /Rango de fechas inválido/i);
+
+  const invalidEndDate = await listOrders('?endDate=2026-02-30');
+  assert.equal(invalidEndDate.status, 400);
+  assert.match(invalidEndDate.json.error, /Rango de fechas inválido/i);
+
+  assert.equal(countCalls, 0, 'los errores de validación no deben llegar a Mongo');
+
+  const tooLongSearch = await listOrders(`?search=${'x'.repeat(81)}`);
+  assert.equal(tooLongSearch.status, 400);
+  assert.match(tooLongSearch.json.error, /80 caracteres/i);
 });

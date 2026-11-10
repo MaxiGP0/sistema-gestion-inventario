@@ -7,7 +7,12 @@
  * una tendría su propio conteo y el límite se multiplicaría por instancia.
  * En ese caso hay que mover estas funciones a un store compartido (Redis con
  * TTL, o MongoDB con upsert atómico). Ver docs/seguridad-cabeceras.md §5.
+ *
+ * `lib/api-rate-limit.ts` usa la misma interfaz de ventana fija para los
+ * endpoints caros; ambos stores pueden migrarse juntos a un adaptador común.
  */
+
+import { UNKNOWN_CLIENT_IP, resolveClientIp } from './client-ip';
 
 export const LOGIN_RATE_LIMIT = {
   /** Intentos fallidos permitidos dentro de la ventana. */
@@ -32,14 +37,12 @@ declare global {
 const store = globalThis.loginRateLimitStore ?? new Map<string, AttemptRecord>();
 globalThis.loginRateLimitStore = store;
 
-/** IP de origen según los headers de proxy; 'desconocida' si no hay ninguno. */
+/**
+ * IP de origen. Sólo usa headers de proxy si `TRUST_PROXY_HEADERS=true`;
+ * por defecto devuelve la IP desconocida para que no se puedan falsificar.
+ */
 export function getClientIp(request: Request): string {
-  const forwardedFor = request.headers.get('x-forwarded-for');
-  if (forwardedFor) {
-    const first = forwardedFor.split(',')[0].trim();
-    if (first) return first;
-  }
-  return request.headers.get('x-real-ip')?.trim() || 'desconocida';
+  return resolveClientIp(request, UNKNOWN_CLIENT_IP);
 }
 
 export function ipRateLimitKey(ip: string): string {

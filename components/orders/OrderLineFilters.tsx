@@ -2,7 +2,11 @@
 
 import { Search, X } from 'lucide-react';
 import FilterChips from '@/components/ui/FilterChips';
-import type { OrderLineFilter, OrderLineFilterCounts } from '@/lib/order-line-filter';
+import type {
+  OrderLineBrandCount,
+  OrderLineFilter,
+  OrderLineFilterCounts,
+} from '@/lib/order-line-filter';
 
 interface OrderLineFiltersProps {
   counts: OrderLineFilterCounts;
@@ -10,6 +14,11 @@ interface OrderLineFiltersProps {
   onFilterChange: (filter: OrderLineFilter) => void;
   query: string;
   onQueryChange: (query: string) => void;
+  /** Marcas presentes en el pedido, ya ordenadas y con su conteo. */
+  brands: readonly OrderLineBrandCount[];
+  /** Marca activa (`'all'` para todas). */
+  brandFilter: string;
+  onBrandFilterChange: (brand: string) => void;
 }
 
 const FILTERS: Array<{ value: OrderLineFilter; label: (counts: OrderLineFilterCounts) => string }> =
@@ -24,7 +33,8 @@ const FILTERS: Array<{ value: OrderLineFilter; label: (counts: OrderLineFilterCo
 
 /**
  * Chips + buscador para pedidos largos. Sólo se monta cuando el pedido supera
- * las 5 líneas, así que no agrega ruido en los pedidos cortos.
+ * las 5 líneas, así que no agrega ruido en los pedidos cortos. Los chips de
+ * marca aparecen únicamente cuando el pedido mezcla dos o más marcas.
  */
 export default function OrderLineFilters({
   counts,
@@ -32,22 +42,48 @@ export default function OrderLineFilters({
   onFilterChange,
   query,
   onQueryChange,
+  brands,
+  brandFilter,
+  onBrandFilterChange,
 }: OrderLineFiltersProps) {
   return (
     <div
-      className="space-y-2 rounded-lg border border-border bg-surface-muted p-2.5"
+      // En mobile la barra queda debajo del top bar (64 px) mientras se
+      // recorre el pedido; en desktop vuelve al flujo normal. El padding y el
+      // margen negativo de los chips mantienen las filas compactas.
+      className="sticky top-16 z-20 rounded-lg border border-border bg-surface/95 p-2 backdrop-blur-sm sm:static sm:z-auto sm:space-y-2 sm:bg-surface-muted sm:p-2.5 sm:backdrop-blur-none"
       data-testid="line-filter-bar"
     >
       <FilterChips
         ariaLabel="Filtrar líneas del pedido"
         value={filter}
         onChange={(value) => onFilterChange(value as OrderLineFilter)}
+        className="max-sm:-mb-1"
         items={FILTERS.map((option) => ({
           value: option.value,
           label: option.label(counts),
           testId: `line-filter-${option.value}`,
         }))}
       />
+
+      {brands.length > 1 && (
+        <FilterChips
+          ariaLabel="Filtrar líneas por marca"
+          value={brandFilter}
+          onChange={onBrandFilterChange}
+          dataTestId="line-brand-filters"
+          itemTestIdPrefix="line-brand-filter-"
+          className="max-sm:-mb-1 max-sm:mt-1 sm:mt-0"
+          items={[
+            { value: 'all', label: 'Todas las marcas', testId: 'line-brand-filter-all' },
+            ...brands.map((brand, index) => ({
+              value: brand.name,
+              label: `${brand.name} (${brand.count})`,
+              testId: `line-brand-filter-${index}`,
+            })),
+          ]}
+        />
+      )}
 
       <div className="relative">
         <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-subtle">

@@ -22,9 +22,20 @@ Se aplican a:
 | Componente | Clase | Alto estimado |
 | --- | --- | --- |
 | `OrderListCard` | `cv-list-item cv-order-card` | 17 rem |
-| `ProductCardMobile` | `cv-list-item cv-product-card` | 13 rem |
-| `ProductRowDesktop` | `cv-list-item cv-table-row` | 3.5 rem |
+| Tarjetas de `DepositOrderVerifyClient` | `cv-list-item cv-deposit-card` | 15 rem |
+| Tarjetas de `BillingOrderClient` | `cv-list-item cv-billing-card` | 12 rem |
+| Tarjetas de `VendorOrderDetail` | `cv-list-item cv-vendor-card` | 10 rem |
+| Tarjetas de `ClientsBrowser` | `cv-list-item cv-client-card` | 9 rem |
+| `ProductCardMobile` / tarjetas de `CatalogBrowser` | `cv-list-item cv-product-card` | 13 rem |
+| Filas de tablas de detalle | `cv-list-item cv-table-row` | 3.5 rem |
 | Ítems de `NotificationsBell` | `cv-list-item cv-notification-item` | 5.5 rem |
+
+La tarjeta con foco (`:focus-within`) o fijada por un filtro (`.cv-pinned`) fuerza
+`content-visibility: visible`, así el input enfocado nunca queda dentro de un
+subárbol omitido ni se producen saltos de scroll al editarlo.
+
+`OrderLineFilters` es `sticky top-16` en mobile: los chips y el buscador quedan
+debajo del top bar mientras se recorre el pedido. En `sm` vuelve al flujo normal.
 
 El `auto` de `contain-intrinsic-size` hace que, después de la primera pintura,
 el navegador recuerde el alto real de cada tarjeta. Así el scroll no salta

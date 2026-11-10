@@ -29,7 +29,10 @@ import {
   type PendingOrderRequest,
 } from '@/lib/offline-order-queue';
 import { readOfflineCatalogClients } from '@/lib/offline-catalog';
-import { restoreOrderDraftFromQueueEntry } from '@/lib/offline-order-restore';
+import {
+  isDraftEditQueueEntry,
+  restoreOrderDraftFromQueueEntry,
+} from '@/lib/offline-order-restore';
 import type { OrderCatalogClient } from '@/lib/order-catalog';
 import { buildPickingAutosaveFromOrderPut, savePickingAutosave } from '@/lib/picking-autosave';
 import type { OrderDetailResponse } from '@/lib/types';
@@ -71,6 +74,7 @@ function queueEntryClientId(entry: PendingOrderRequest): string {
 function queueEntryTitle(entry: PendingOrderRequest): string {
   if (entry.kind === 'create') return 'Alta de pedido';
   const reference = entry.orderId?.slice(-6) ?? entry.id.slice(-6);
+  if (isDraftEditQueueEntry(entry)) return `Edición de borrador #${reference}`;
   return `Picking de pedido #${reference}`;
 }
 
@@ -111,6 +115,7 @@ export default function OfflineSyncIndicator() {
   const pending = entries.length;
   const failedCount = entries.filter((entry) => entry.status === 'failed').length;
   const pendingOnlyCount = pending - failedCount;
+  const indicatorVisible = syncing || pending > 0;
 
   const refreshQueue = useCallback(async (): Promise<PendingOrderRequest[]> => {
     try {
@@ -304,6 +309,32 @@ export default function OfflineSyncIndicator() {
     recordOfflineQueueSize(pending, { online, syncing });
   }, [pending, online, syncing]);
 
+  // Señal de disponibilidad para los E2E: si el navegador pasa a offline antes
+  // de que se descargue este chunk dinámico, el import falla y la cola queda
+  // inaccesible. Los tests esperan esta marca antes de simular un corte.
+  useEffect(() => {
+    const root = document.documentElement;
+    root.dataset.offlineSyncReady = 'true';
+
+    return () => {
+      delete root.dataset.offlineSyncReady;
+    };
+  }, []);
+
+  // Marca en <html> que la píldora ocupa la primera capa inferior. El CSS
+  // sube el resto de avisos (chip SSE, SW y toast) para que se apilen sin
+  // compartir coordenada con este indicador.
+  useEffect(() => {
+    if (!indicatorVisible) return;
+
+    const root = document.documentElement;
+    root.dataset.offlineSyncVisible = 'true';
+
+    return () => {
+      delete root.dataset.offlineSyncVisible;
+    };
+  }, [indicatorVisible]);
+
   // El detalle necesita el nombre del cliente incluso en entradas viejas que no
   // guardaron metadata. Se resuelve contra el snapshot offline del usuario.
   useEffect(() => {
@@ -372,12 +403,16 @@ export default function OfflineSyncIndicator() {
         }
       })();
 
+      const isDraftEdit = isDraftEditQueueEntry(entry);
+      const targetOrderId = isDraftEdit ? entry.orderId : undefined;
+
       const restored = restoreOrderDraftFromQueueEntry(
         {
           userId: user.id,
           salesperson: user.username,
           knownClients,
           storage,
+          orderId: targetOrderId,
         },
         entry,
       );
@@ -395,15 +430,20 @@ export default function OfflineSyncIndicator() {
       await deletePendingOrderRequest(entry.id);
       setQueueOpen(false);
       showToast(
-        'Pedido restaurado en el borrador. Revisá el cliente y los productos antes de guardar.',
+        isDraftEdit
+          ? 'Cambios restaurados en el borrador de edición. Revisá el pedido antes de guardar.'
+          : 'Pedido restaurado en el borrador. Revisá el cliente y los productos antes de guardar.',
         'success',
         8000,
       );
 
-      if (window.location.pathname === '/orders/new') {
+      const targetPath =
+        isDraftEdit && targetOrderId ? `/orders/${targetOrderId}/edit` : '/orders/new';
+
+      if (window.location.pathname === targetPath) {
         window.location.reload();
       } else {
-        router.push('/orders/new');
+        router.push(targetPath);
       }
     } catch (error) {
       console.error('No se pudo restaurar el pedido fallido:', error);
@@ -496,12 +536,12 @@ export default function OfflineSyncIndicator() {
     }
   };
 
-  const openCurrentOrder = (orderId: string) => {
+  const openCurrentOrder = (orderId: string, isDraftEdit = false) => {
     setQueueOpen(false);
-    router.push(`/deposit/orders/${orderId}`);
+    router.push(isDraftEdit ? `/orders/${orderId}` : `/deposit/orders/${orderId}`);
   };
 
-  if (!syncing && pending === 0) return null;
+  if (!indicatorVisible) return null;
 
   const failedLabel = failedCount === 1 ? '1 cambio con error' : `${failedCount} cambios con error`;
   const pendingLabel =
@@ -527,7 +567,8 @@ export default function OfflineSyncIndicator() {
   return (
     <>
       <div
-        className="fixed inset-x-3 bottom-[calc(env(safe-area-inset-bottom)+var(--mobile-sync-clearance))] z-40 max-w-[calc(100vw-1.5rem)] sm:inset-x-auto sm:bottom-4 sm:left-4 sm:max-w-[calc(100vw-2rem)]"
+        data-testid="offline-sync-indicator-wrapper"
+        className="fixed inset-x-3 bottom-[calc(env(safe-area-inset-bottom)+var(--mobile-sync-clearance))] z-40 max-w-[calc(100vw-1.5rem)] transition-all duration-200 motion-reduce:transition-none [html[data-mobile-keyboard='open']_&]:pointer-events-none [html[data-mobile-keyboard='open']_&]:translate-y-2 [html[data-mobile-keyboard='open']_&]:opacity-0 sm:inset-x-auto sm:bottom-4 sm:left-4 sm:max-w-[calc(100vw-2rem)]"
         role="status"
         aria-live="polite"
       >
@@ -706,27 +747,53 @@ export default function OfflineSyncIndicator() {
                             </>
                           )}
 
-                          {entry.kind === 'update' && entry.orderId && (
-                            <>
-                              <Button
-                                size="sm"
-                                variant="primary"
-                                onClick={() => void handleRestorePickingControl(entry)}
-                                disabled={busy}
-                              >
-                                <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-                                {busy ? 'Restaurando...' : 'Restaurar control en el pedido'}
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="secondary"
-                                onClick={() => openCurrentOrder(entry.orderId!)}
-                                disabled={busy}
-                              >
-                                Abrir pedido actual
-                              </Button>
-                            </>
-                          )}
+                          {entry.kind === 'update' &&
+                            entry.orderId &&
+                            isDraftEditQueueEntry(entry) && (
+                              <>
+                                <Button
+                                  size="sm"
+                                  variant="primary"
+                                  onClick={() => void handleRestoreDraft(entry)}
+                                  disabled={busy}
+                                >
+                                  <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                                  {busy ? 'Restaurando...' : 'Restaurar en borrador'}
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  onClick={() => openCurrentOrder(entry.orderId!, true)}
+                                  disabled={busy}
+                                >
+                                  Abrir pedido actual
+                                </Button>
+                              </>
+                            )}
+
+                          {entry.kind === 'update' &&
+                            entry.orderId &&
+                            !isDraftEditQueueEntry(entry) && (
+                              <>
+                                <Button
+                                  size="sm"
+                                  variant="primary"
+                                  onClick={() => void handleRestorePickingControl(entry)}
+                                  disabled={busy}
+                                >
+                                  <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                                  {busy ? 'Restaurando...' : 'Restaurar control en el pedido'}
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  onClick={() => openCurrentOrder(entry.orderId!, false)}
+                                  disabled={busy}
+                                >
+                                  Abrir pedido actual
+                                </Button>
+                              </>
+                            )}
 
                           <Button
                             size="sm"

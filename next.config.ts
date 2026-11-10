@@ -38,6 +38,10 @@ const BUILD_ID = resolveBuildId();
 const nextConfig: NextConfig = {
   env: {
     NEXT_PUBLIC_BUILD_ID: BUILD_ID,
+    // El snapshot offline corre en el navegador; estos topes se inlinean en el
+    // bundle para que OFFLINE_CATALOG_MAX_* funcione sin prefijo público.
+    OFFLINE_CATALOG_MAX_PRODUCTS: process.env.OFFLINE_CATALOG_MAX_PRODUCTS ?? '5000',
+    OFFLINE_CATALOG_MAX_CLIENTS: process.env.OFFLINE_CATALOG_MAX_CLIENTS ?? '2000',
   },
   /* config options here */
   compress: true,

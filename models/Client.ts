@@ -77,6 +77,8 @@ ClientSchema.index({ searchProvince: 1 });
 ClientSchema.index({ searchAddress: 1 });
 // Multikey de palabras: permite exigir todos los tokens en cualquier posición.
 ClientSchema.index({ searchTokens: 1 });
+// Snapshot incremental del catálogo offline: orden estable por actualización.
+ClientSchema.index({ updatedAt: 1, _id: 1 });
 
 export const Client: Model<IClient> =
   mongoose.models.Client || mongoose.model<IClient>('Client', ClientSchema);

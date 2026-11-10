@@ -11,6 +11,7 @@ import {
   Search,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   CircleDollarSign,
   Percent,
 } from 'lucide-react';
@@ -30,6 +31,7 @@ import {
   TableRow,
 } from '@/components/ui/Table';
 import { useToast } from '@/context/ToastContext';
+import { useUrlSearchSync } from '@/hooks/useUrlSearchSync';
 import { api } from '@/lib/api-client';
 import { invalidateCatalogCache } from '@/lib/catalog-query-cache';
 import {
@@ -96,6 +98,7 @@ export default function ProductsManager({
   const [priceWithIva, setPriceWithIva] = useState('');
   const [imageUrl, setImageUrl] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [mobileFormOpen, setMobileFormOpen] = useState(false);
   const [search, setSearch] = useState(initialSearch);
   const [loading, setLoading] = useState(false);
   const [isPending, startTransition] = useTransition();
@@ -121,6 +124,7 @@ export default function ProductsManager({
   const formCardRef = useRef<HTMLDivElement>(null);
   const codeInputRef = useRef<HTMLInputElement>(null);
   const quickPriceInputRef = useRef<HTMLInputElement>(null);
+  const formPanelId = useId();
   const quickTitleId = useId();
   const quickDescriptionId = useId();
   const quickPriceInputId = useId();
@@ -137,10 +141,12 @@ export default function ProductsManager({
     setProducts(initialProducts);
   }, [initialProducts]);
 
-  // Mantiene el input alineado con la URL (atrás/adelante, refresh del server).
-  useEffect(() => {
-    setSearch(initialSearch);
-  }, [initialSearch]);
+  // Mantiene el input alineado con la URL (atrás/adelante, refresh del server)
+  // sin borrar los caracteres escritos mientras la navegación está en curso.
+  const markSearchCommitted = useUrlSearchSync({
+    serverValue: initialSearch,
+    setValue: setSearch,
+  });
 
   // Mantiene el chip activo alineado con la URL.
   useEffect(() => {
@@ -165,6 +171,7 @@ export default function ProductsManager({
 
     const timer = setTimeout(
       () => {
+        markSearchCommitted(trimmed);
         startTransition(() => {
           router.replace(buildProductsUrl(1, trimmed, filterBrandId));
         });
@@ -173,12 +180,13 @@ export default function ProductsManager({
     );
 
     return () => clearTimeout(timer);
-  }, [search, initialSearch, filterBrandId, router]);
+  }, [search, initialSearch, filterBrandId, router, markSearchCommitted]);
 
   const handleBrandFilterChange = (nextBrandId: string) => {
     if (nextBrandId === filterBrandId) return;
 
     setFilterBrandId(nextBrandId);
+    markSearchCommitted(search);
     startTransition(() => {
       router.replace(buildProductsUrl(1, search.trim(), nextBrandId));
     });
@@ -237,6 +245,7 @@ export default function ProductsManager({
 
   const handleEdit = (product: ProductDTO) => {
     setEditingId(product._id);
+    setMobileFormOpen(true);
     setBrandId(product.brandId?._id || '');
     setCode(product.code);
     setName(product.name);
@@ -245,15 +254,29 @@ export default function ProductsManager({
     setImageUrl(product.imageUrl || '');
 
     // En mobile el formulario queda arriba de la lista: al tocar "Editar"
-    // llevamos al usuario hasta él y enfocamos el primer campo editable.
+    // lo desplegamos, llevamos al usuario hasta él y enfocamos el primer campo.
     requestAnimationFrame(() => {
       formCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       codeInputRef.current?.focus({ preventScroll: true });
     });
   };
 
+  const openMobileForm = () => {
+    setMobileFormOpen(true);
+    requestAnimationFrame(() => {
+      formCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      codeInputRef.current?.focus({ preventScroll: true });
+    });
+  };
+
+  const closeMobileForm = () => {
+    if (editingId) return;
+    setMobileFormOpen(false);
+  };
+
   const resetForm = () => {
     setEditingId(null);
+    setMobileFormOpen(false);
     setCode('');
     setName('');
     setPrice('');
@@ -437,6 +460,7 @@ export default function ProductsManager({
 
   const goToPage = (targetPage: number) => {
     if (targetPage < 1 || targetPage > totalPages || targetPage === page) return;
+    markSearchCommitted(search);
     startTransition(() => {
       router.push(buildProductsUrl(targetPage, search.trim(), filterBrandId));
     });
@@ -462,14 +486,44 @@ export default function ProductsManager({
   return (
     <>
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3 lg:gap-8">
+        {!mobileFormOpen && !editingId && (
+          <Card
+            padding="none"
+            className="flex items-center justify-between gap-3 px-3 py-1 lg:hidden"
+            data-testid="product-mobile-form-toggle"
+          >
+            <div className="flex min-w-0 items-center gap-2">
+              <div className="rounded-md bg-action-soft p-2 text-action-text">
+                <PlusCircle className="h-5 w-5" aria-hidden="true" />
+              </div>
+              <h2 className="truncate text-sm font-semibold text-foreground">Nuevo Producto</h2>
+            </div>
+            <Button
+              type="button"
+              variant="primary"
+              size="sm"
+              onClick={openMobileForm}
+              aria-expanded={false}
+              aria-controls={formPanelId}
+              className="min-h-11 shrink-0"
+            >
+              + Nuevo Producto
+            </Button>
+          </Card>
+        )}
+
         {/* Formulario de Alta / Edición Manual */}
-        <div ref={formCardRef} className="scroll-mt-24">
+        <div
+          id={formPanelId}
+          ref={formCardRef}
+          className={`scroll-mt-24 ${mobileFormOpen || editingId ? 'block' : 'hidden'} lg:block`}
+        >
           <Card className={`h-fit transition-shadow ${editingId ? 'ring-2 ring-focus/40' : ''}`}>
             <div className="mb-6 flex items-center gap-3">
               <div className="rounded-md bg-action-soft p-3 text-action-text">
                 <PlusCircle className="h-6 w-6" aria-hidden="true" />
               </div>
-              <div>
+              <div className="min-w-0">
                 <h2 className="text-base font-semibold text-foreground">
                   {editingId ? 'Editar Producto' : 'Nuevo Producto'}
                 </h2>
@@ -477,6 +531,19 @@ export default function ProductsManager({
                   {editingId ? 'Modificar datos del producto' : 'Alta o actualización unitaria'}
                 </p>
               </div>
+              {!editingId && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={closeMobileForm}
+                  title="Ocultar formulario"
+                  aria-label="Ocultar formulario"
+                  className="ml-auto shrink-0 lg:hidden"
+                >
+                  <ChevronUp className="h-4 w-4" aria-hidden="true" />
+                </Button>
+              )}
             </div>
 
             {editingId && (
@@ -535,7 +602,7 @@ export default function ProductsManager({
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   required
-                  placeholder="Ej: Shampoo Capitalis 400ml"
+                  placeholder="Ej: Shampoo NovaFarma 400ml"
                   className="min-h-11 w-full rounded-md border border-border-strong bg-field px-3 py-2 text-sm text-foreground outline-none transition-colors placeholder:text-subtle focus:border-focus focus:ring-2 focus:ring-focus/30   "
                 />
               </div>
@@ -612,8 +679,8 @@ export default function ProductsManager({
 
         {/* Listado de Productos Existentes */}
         <Card className="lg:col-span-2 flex flex-col ">
-          <div className="mb-6 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-            <div className="flex items-center gap-3">
+          <div className="mb-6 flex flex-col justify-between gap-3 max-sm:contents sm:flex-row sm:items-center">
+            <div className="flex items-center gap-3 max-sm:order-1 max-sm:mb-4">
               <div className="rounded-md bg-action-soft p-3 text-action-text">
                 <Package className="h-6 w-6" aria-hidden="true" />
               </div>
@@ -626,7 +693,7 @@ export default function ProductsManager({
                 </p>
               </div>
             </div>
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap gap-2 max-sm:order-4 max-sm:mb-4">
               <Button
                 variant="secondary"
                 size="sm"
@@ -646,69 +713,72 @@ export default function ProductsManager({
             </div>
           </div>
 
-          <div className={`flex-1 transition-opacity ${isPending ? 'opacity-60' : 'opacity-100'}`}>
-            {/* Buscador de Productos */}
-            <div className="relative mb-4">
-              <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-muted">
-                <Search className="w-4 h-4" />
-              </span>
-              <input
-                type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Buscar por código, nombre o marca..."
-                aria-label="Buscar productos por código, nombre o marca"
-                className="min-h-11 w-full rounded-md border border-border-strong bg-field py-2 pl-9 pr-12 text-base text-foreground outline-none focus:border-focus focus:ring-2 focus:ring-focus/30 sm:text-sm   "
-              />
-              {search && (
-                <button
-                  type="button"
-                  onClick={() => setSearch('')}
-                  aria-label="Limpiar búsqueda de productos"
-                  title="Limpiar búsqueda"
-                  className="absolute inset-y-0 right-0 flex min-h-11 min-w-11 items-center justify-center rounded-r-md text-muted transition-colors hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
-                >
-                  <X className="h-4 w-4" aria-hidden="true" />
-                </button>
-              )}
-            </div>
-
-            {/* Filtro horizontal por marca */}
-            <div
-              role="group"
-              aria-label="Filtrar por marca"
-              data-testid="backoffice-brand-filter"
-              className="-mx-1 mb-4 flex gap-2 overflow-x-auto px-1 pb-1"
-            >
-              <Button
+          {/* Buscador de Productos: en mobile queda antes de las acciones
+              para que la lista arranque visible sin scroll. */}
+          <div className="relative mb-4 max-sm:order-2">
+            <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-muted">
+              <Search className="w-4 h-4" />
+            </span>
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Buscar por código, nombre o marca..."
+              aria-label="Buscar productos por código, nombre o marca"
+              className="min-h-11 w-full rounded-md border border-border-strong bg-field py-2 pl-9 pr-12 text-base text-foreground outline-none focus:border-focus focus:ring-2 focus:ring-focus/30 sm:text-sm   "
+            />
+            {search && (
+              <button
                 type="button"
-                variant={filterBrandId ? 'secondary' : 'primary'}
-                size="sm"
-                aria-pressed={!filterBrandId}
-                onClick={() => handleBrandFilterChange('')}
-                className="shrink-0 rounded-full"
+                onClick={() => setSearch('')}
+                aria-label="Limpiar búsqueda de productos"
+                title="Limpiar búsqueda"
+                className="absolute inset-y-0 right-0 flex min-h-11 min-w-11 items-center justify-center rounded-r-md text-muted transition-colors hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
               >
-                Todas
-              </Button>
-              {brands.map((brand) => {
-                const isActive = brand._id === filterBrandId;
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            )}
+          </div>
 
-                return (
-                  <Button
-                    key={brand._id}
-                    type="button"
-                    variant={isActive ? 'primary' : 'secondary'}
-                    size="sm"
-                    aria-pressed={isActive}
-                    onClick={() => handleBrandFilterChange(brand._id)}
-                    className="shrink-0 rounded-full"
-                  >
-                    {brand.name}
-                  </Button>
-                );
-              })}
-            </div>
+          {/* Filtro horizontal por marca */}
+          <div
+            role="group"
+            aria-label="Filtrar por marca"
+            data-testid="backoffice-brand-filter"
+            className="-mx-1 mb-4 flex gap-2 overflow-x-auto px-1 pb-1 max-sm:order-3"
+          >
+            <Button
+              type="button"
+              variant={filterBrandId ? 'secondary' : 'primary'}
+              size="sm"
+              aria-pressed={!filterBrandId}
+              onClick={() => handleBrandFilterChange('')}
+              className="shrink-0 rounded-full"
+            >
+              Todas
+            </Button>
+            {brands.map((brand) => {
+              const isActive = brand._id === filterBrandId;
 
+              return (
+                <Button
+                  key={brand._id}
+                  type="button"
+                  variant={isActive ? 'primary' : 'secondary'}
+                  size="sm"
+                  aria-pressed={isActive}
+                  onClick={() => handleBrandFilterChange(brand._id)}
+                  className="shrink-0 rounded-full"
+                >
+                  {brand.name}
+                </Button>
+              );
+            })}
+          </div>
+
+          <div
+            className={`flex-1 transition-opacity max-sm:order-5 ${isPending ? 'opacity-60' : 'opacity-100'}`}
+          >
             {/* Mobile Card View */}
             <div className="block sm:hidden space-y-3">
               {products.length === 0 ? (

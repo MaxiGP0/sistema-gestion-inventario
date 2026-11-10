@@ -8,6 +8,10 @@
  */
 
 import type { PendingOrderPut, PendingOrderRequest } from './offline-order-queue';
+import { createRequestTimeout, raceWithAbort } from './request-timeout';
+
+/** Tiempo máximo por entrada al reintentar una escritura de pedido. */
+export const ORDER_SYNC_TIMEOUT_MS = 15_000;
 
 export interface OrderQueueAdapter {
   list(): Promise<ReadonlyArray<PendingOrderRequest | PendingOrderPut>>;
@@ -23,6 +27,11 @@ export type OrderPutQueueAdapter = OrderQueueAdapter;
 export interface ProcessOrderQueueOptions {
   fetchImpl?: typeof fetch;
   isOnline?: () => boolean;
+  /**
+   * Timeout de cada entrada. Por defecto 15 s; `0` lo desactiva (sólo para
+   * tests o entornos donde el llamador ya acota el tiempo).
+   */
+  timeoutMs?: number;
 }
 
 export type ProcessOrderPutOptions = ProcessOrderQueueOptions;
@@ -176,29 +185,45 @@ async function runProcessPendingOrderRequests(
     if (entry.status === 'failed') continue;
 
     let response: Response;
+    const timeout = createRequestTimeout(options.timeoutMs ?? ORDER_SYNC_TIMEOUT_MS);
 
     try {
-      response = await fetchImpl(entry.url, {
-        method: entry.method,
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify(entry.body),
-      });
+      response = await raceWithAbort(
+        fetchImpl(entry.url, {
+          method: entry.method,
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify(entry.body),
+          signal: timeout.signal,
+        }),
+        timeout.signal,
+      );
     } catch (error) {
-      const message =
-        error instanceof Error && error.message
+      const timedOut = timeout.timedOut();
+      const message = timedOut
+        ? 'La conexión tardó demasiado al reintentar el pedido.'
+        : error instanceof Error && error.message
           ? error.message
           : 'Error de red al reintentar el pedido';
 
       await queue.markAttempt(entry.id, message);
       result.failed.push(
-        failureOf(entry, 'Sin conexión o error de red al reintentar.', {
-          retryable: true,
-        }),
+        failureOf(
+          entry,
+          timedOut
+            ? 'La conexión tardó demasiado. El pedido sigue guardado y se reintentará.'
+            : 'Sin conexión o error de red al reintentar.',
+          {
+            retryable: true,
+            ...(timedOut ? { status: 0 } : {}),
+          },
+        ),
       );
       // Si la red falló, el resto también fallaría: se reintenta en el próximo
       // evento online / apertura de la app.
       break;
+    } finally {
+      timeout.cleanup();
     }
 
     if (response.ok) {

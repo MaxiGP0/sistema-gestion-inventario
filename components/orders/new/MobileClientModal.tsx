@@ -51,6 +51,11 @@ export default function MobileClientModal({
     onClose();
   };
 
+  const handleClearSearch = () => {
+    onSearchChange('');
+    requestAnimationFrame(() => searchRef.current?.focus());
+  };
+
   return (
     <Modal
       open={open}
@@ -99,8 +104,19 @@ export default function MobileClientModal({
           placeholder="Buscar por código, nombre o localidad..."
           aria-label="Buscar cliente"
           autoFocus
-          className="min-h-11 w-full rounded-md border border-border-strong bg-field py-2 pl-9 pr-4 text-sm text-foreground outline-none transition-colors placeholder:text-subtle focus:border-focus focus:ring-2 focus:ring-focus/30"
+          className="min-h-11 w-full rounded-md border border-border-strong bg-field py-2 pl-9 pr-12 text-sm text-foreground outline-none transition-colors placeholder:text-subtle focus:border-focus focus:ring-2 focus:ring-focus/30"
         />
+        {search && (
+          <button
+            type="button"
+            onClick={handleClearSearch}
+            aria-label="Limpiar búsqueda de cliente"
+            title="Limpiar búsqueda"
+            className="absolute inset-y-0 right-0 flex min-h-11 min-w-11 items-center justify-center rounded-r-md text-subtle transition-colors hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+          >
+            <X className="h-4 w-4" aria-hidden="true" />
+          </button>
+        )}
       </div>
 
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain pr-1">

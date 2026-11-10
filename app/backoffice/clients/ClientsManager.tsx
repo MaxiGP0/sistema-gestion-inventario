@@ -10,6 +10,7 @@ import {
   Search,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Percent,
   Sparkles,
 } from 'lucide-react';
@@ -28,6 +29,7 @@ import {
   TableRow,
 } from '@/components/ui/Table';
 import { useToast } from '@/context/ToastContext';
+import { useUrlSearchSync } from '@/hooks/useUrlSearchSync';
 import { api } from '@/lib/api-client';
 import { invalidateCatalogCache } from '@/lib/catalog-query-cache';
 import { buildClientCodeSuggestion } from '@/lib/client-code';
@@ -79,6 +81,7 @@ export default function ClientsManager({
   const [brandDiscountPct, setBrandDiscountPct] = useState('');
 
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [mobileFormOpen, setMobileFormOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
 
@@ -97,6 +100,7 @@ export default function ClientsManager({
   const [quickBrandDiscountPct, setQuickBrandDiscountPct] = useState('');
   const [quickDiscountSaving, setQuickDiscountSaving] = useState(false);
   const quickDiscountInputRef = useRef<HTMLInputElement>(null);
+  const formPanelId = useId();
   const quickDiscountTitleId = useId();
   const quickDiscountDescriptionId = useId();
   const quickGeneralDiscountId = useId();
@@ -111,10 +115,12 @@ export default function ClientsManager({
     setClients(initialClients);
   }, [initialClients]);
 
-  // Mantiene el input alineado con la URL (atrás/adelante, refresh del server).
-  useEffect(() => {
-    setSearch(initialSearch);
-  }, [initialSearch]);
+  // Mantiene el input alineado con la URL (atrás/adelante, refresh del server)
+  // sin borrar los caracteres escritos mientras la navegación está en curso.
+  const markSearchCommitted = useUrlSearchSync({
+    serverValue: initialSearch,
+    setValue: setSearch,
+  });
 
   // Búsqueda con debounce: la consulta real la hace el Server Component.
   useEffect(() => {
@@ -123,6 +129,7 @@ export default function ClientsManager({
 
     const timer = setTimeout(
       () => {
+        markSearchCommitted(trimmed);
         startTransition(() => {
           router.replace(buildClientsUrl(1, trimmed));
         });
@@ -131,7 +138,7 @@ export default function ClientsManager({
     );
 
     return () => clearTimeout(timer);
-  }, [search, initialSearch, router]);
+  }, [search, initialSearch, router, markSearchCommitted]);
 
   const handleAddBrandDiscount = () => {
     if (!selectedBrandId) return;
@@ -292,6 +299,7 @@ export default function ClientsManager({
 
   const handleEdit = (client: ClientDTO) => {
     setEditingId(client._id);
+    setMobileFormOpen(true);
     setCode(client.code);
     setName(client.name);
     setAddress(client.address || '');
@@ -307,16 +315,30 @@ export default function ClientsManager({
         : [],
     );
 
-    // En mobile el formulario está arriba: llevamos al usuario hasta él y
-    // enfocamos el primer campo para continuar la edición sin buscar a mano.
+    // En mobile el formulario está arriba: lo desplegamos, llevamos al usuario
+    // hasta él y enfocamos el primer campo para continuar la edición.
     requestAnimationFrame(() => {
       formCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       codeInputRef.current?.focus({ preventScroll: true });
     });
   };
 
+  const openMobileForm = () => {
+    setMobileFormOpen(true);
+    requestAnimationFrame(() => {
+      formCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      codeInputRef.current?.focus({ preventScroll: true });
+    });
+  };
+
+  const closeMobileForm = () => {
+    if (editingId) return;
+    setMobileFormOpen(false);
+  };
+
   const resetForm = () => {
     setEditingId(null);
+    setMobileFormOpen(false);
     setCode('');
     setName('');
     setAddress('');
@@ -344,6 +366,7 @@ export default function ClientsManager({
 
   const goToPage = (targetPage: number) => {
     if (targetPage < 1 || targetPage > totalPages || targetPage === page) return;
+    markSearchCommitted(search);
     startTransition(() => {
       router.push(buildClientsUrl(targetPage, search.trim()));
     });
@@ -358,14 +381,44 @@ export default function ClientsManager({
   return (
     <>
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3 lg:gap-8">
+        {!mobileFormOpen && !editingId && (
+          <Card
+            padding="none"
+            className="flex items-center justify-between gap-3 px-3 py-1 lg:hidden"
+            data-testid="client-mobile-form-toggle"
+          >
+            <div className="flex min-w-0 items-center gap-2">
+              <div className="rounded-md bg-action-soft p-2 text-action-text">
+                <Users className="h-5 w-5" aria-hidden="true" />
+              </div>
+              <h2 className="truncate text-sm font-semibold text-foreground">Nuevo Cliente</h2>
+            </div>
+            <Button
+              type="button"
+              variant="primary"
+              size="sm"
+              onClick={openMobileForm}
+              aria-expanded={false}
+              aria-controls={formPanelId}
+              className="min-h-11 shrink-0"
+            >
+              + Nuevo Cliente
+            </Button>
+          </Card>
+        )}
+
         {/* Formulario */}
-        <div ref={formCardRef} className="scroll-mt-24">
+        <div
+          id={formPanelId}
+          ref={formCardRef}
+          className={`scroll-mt-24 ${mobileFormOpen || editingId ? 'block' : 'hidden'} lg:block`}
+        >
           <Card className={`h-fit transition-shadow ${editingId ? 'ring-2 ring-focus/40' : ''}`}>
             <div className="mb-6 flex items-center gap-3">
               <div className="rounded-md bg-action-soft p-3 text-action-text">
                 <Users className="h-6 w-6" aria-hidden="true" />
               </div>
-              <div>
+              <div className="min-w-0">
                 <h2 className="text-base font-semibold text-foreground">
                   {editingId ? 'Editar Cliente' : 'Nuevo Cliente'}
                 </h2>
@@ -373,6 +426,19 @@ export default function ClientsManager({
                   {editingId ? 'Modificar datos del cliente' : 'Alta unitaria de cliente'}
                 </p>
               </div>
+              {!editingId && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={closeMobileForm}
+                  title="Ocultar formulario"
+                  aria-label="Ocultar formulario"
+                  className="ml-auto shrink-0 lg:hidden"
+                >
+                  <ChevronUp className="h-4 w-4" aria-hidden="true" />
+                </Button>
+              )}
             </div>
 
             {editingId && (
@@ -590,8 +656,8 @@ export default function ClientsManager({
 
         {/* Listado de Clientes Existentes */}
         <Card className="lg:col-span-2 flex flex-col ">
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6">
-            <div className="flex items-center gap-3">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6 max-sm:contents">
+            <div className="flex items-center gap-3 max-sm:order-1 max-sm:mb-4">
               <div className="p-3 bg-action-soft text-action-text rounded-md">
                 <Users className="w-6 h-6" />
               </div>
@@ -604,14 +670,15 @@ export default function ClientsManager({
               variant="secondary"
               size="sm"
               onClick={() => router.push('/backoffice/import')}
-              className="whitespace-nowrap"
+              className="whitespace-nowrap max-sm:order-3 max-sm:mb-4"
             >
               Importar Clientes por Excel
             </Button>
           </div>
 
-          {/* Buscador de Clientes en Backoffice */}
-          <div className="relative mb-4">
+          {/* Buscador de Clientes en Backoffice: en mobile va antes de las
+              acciones para dejar la cartera visible sin scroll. */}
+          <div className="relative mb-4 max-sm:order-2">
             <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-muted">
               <Search className="w-4 h-4" />
             </span>
@@ -637,7 +704,7 @@ export default function ClientsManager({
           </div>
 
           <div
-            className={`flex-1 min-h-[300px] transition-opacity ${isPending ? 'opacity-60' : 'opacity-100'}`}
+            className={`flex-1 min-h-[300px] transition-opacity max-sm:order-4 ${isPending ? 'opacity-60' : 'opacity-100'}`}
           >
             {/* Mobile Card View */}
             <div className="block sm:hidden space-y-3">
@@ -796,7 +863,7 @@ export default function ClientsManager({
 
           {/* Paginación */}
           {totalPages > 1 && (
-            <div className="mt-4 flex items-center justify-between border-t border-border pt-4 text-xs text-muted">
+            <div className="mt-4 flex items-center justify-between border-t border-border pt-4 text-xs text-muted max-sm:order-5">
               <span>
                 Página {page} de {totalPages}
               </span>

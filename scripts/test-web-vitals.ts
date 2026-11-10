@@ -55,8 +55,7 @@ test('normaliza las métricas soportadas y descarta FCP u otras', () => {
       value: 1234.6,
       rating: 'good',
       navigationType: 'navigate',
-      navigationURL:
-        'https://app.inventario.test/orders/64f1234567890abcdef12345?token=secreto#top',
+      navigationURL: 'https://app.sgi.test/orders/64f1234567890abcdef12345?token=secreto#top',
     },
     { width: 390, release: 'abc123' },
   );

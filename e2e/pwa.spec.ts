@@ -174,7 +174,7 @@ test('logout limpia catálogo, borradores y la marca de usuario offline', async 
   await page.evaluate(
     () =>
       new Promise<void>((resolve, reject) => {
-        const request = indexedDB.open('sgi-offline-catalog', 1);
+        const request = indexedDB.open('sgi-offline-catalog');
         request.onupgradeneeded = () => {
           request.result.createObjectStore('clients', { keyPath: 'key' });
         };

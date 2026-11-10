@@ -5,6 +5,24 @@ export const NOTIFICATION_TARGET_ROLES = ['deposit', 'billing', 'vendor', 'all']
 
 export type NotificationTargetRole = (typeof NOTIFICATION_TARGET_ROLES)[number];
 
+/** Cantidad de notificaciones que devuelve una página por defecto. */
+export const NOTIFICATION_PAGE_SIZE = 30;
+
+/**
+ * Carga útil que viaja dentro del evento SSE de una bandeja destinataria.
+ *
+ * El servidor solo la adjunta a las conexiones cuya bandeja coincide con
+ * `targetRole`; el resto recibe el evento liviano y hace un GET de respaldo.
+ */
+export interface NotificationEventPayload {
+  id: string;
+  title: string;
+  message: string;
+  createdAt: string;
+  targetRole: NotificationTargetRole;
+  orderId?: string;
+}
+
 /** Notificación compartida (sin el estado de lectura del usuario). */
 export interface NotificationDTO {
   _id: string;

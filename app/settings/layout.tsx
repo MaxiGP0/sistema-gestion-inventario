@@ -1,5 +1,5 @@
 import AppShell from '@/components/app-shell/AppShell';
-import { requireRolePage } from '@/lib/auth-page';
+import { requireCurrentRolePage } from '@/lib/auth-page';
 import { USER_ROLES } from '@/lib/authz';
 import { sectionMetadata } from '@/lib/metadata';
 import SettingsAccountSummary from './SettingsAccountSummary';
@@ -19,7 +19,7 @@ export default async function SettingsLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const session = await requireRolePage(USER_ROLES);
+  const session = await requireCurrentRolePage(USER_ROLES);
 
   return (
     <AppShell

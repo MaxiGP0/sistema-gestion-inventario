@@ -12,6 +12,18 @@ import type { ApiErrorBody } from './types';
 import { captureClientApiError } from './observability/errors';
 import { REQUEST_ID_HEADER } from './observability/request-id';
 import { routeFromUrl } from './observability/routes';
+import { createRequestTimeout, raceWithAbort } from './request-timeout';
+
+/** Tiempo máximo por defecto de una petición HTTP. `0` lo desactiva. */
+export const API_REQUEST_TIMEOUT_MS = 15_000;
+/** Lecturas de catálogo: se degradan rápido a la copia local. */
+export const CATALOG_REQUEST_TIMEOUT_MS = 8_000;
+/** Export/import: operaciones largas que no deben cortarse a los 15 s. */
+export const LONG_REQUEST_TIMEOUT_MS = 120_000;
+
+/** Mensaje homogéneo cuando una petición vence por timeout. */
+export const API_TIMEOUT_MESSAGE =
+  'La conexión tardó demasiado. Revisá tu señal e intentá de nuevo.';
 
 export interface ApiRequestOptions extends Omit<RequestInit, 'body'> {
   /**
@@ -21,7 +33,7 @@ export interface ApiRequestOptions extends Omit<RequestInit, 'body'> {
    */
   body?: unknown;
   /**
-   * Señal para cancelar la petición. Se reenvía tal cual a `fetch`: al
+   * Señal para cancelar la petición. Se combina con el timeout interno: al
    * abortarla, la promesa rechaza con un error de tipo `AbortError` (no se
    * envuelve como error de red ni se reporta a Sentry).
    *
@@ -29,6 +41,12 @@ export interface ApiRequestOptions extends Omit<RequestInit, 'body'> {
    * habitual, o `createLatestRequest()` cuando la regla es "gana la última".
    */
   signal?: AbortSignal;
+  /**
+   * Tiempo máximo de la petición en milisegundos. Por defecto 15 s; `0`
+   * desactiva el timeout. Los flujos largos (export/import) deben pasar
+   * `LONG_REQUEST_TIMEOUT_MS` y las lecturas de catálogo usan 8 s.
+   */
+  timeoutMs?: number;
 }
 
 /** Crea un controlador listo para cancelar una petición en curso. */
@@ -63,6 +81,8 @@ export interface ApiClientErrorOptions {
   payload?: ApiErrorBody | null;
   /** `true` cuando `fetch` no pudo conectarse (sin respuesta HTTP). */
   isNetworkError?: boolean;
+  /** `true` cuando la petición se cortó por vencer `timeoutMs`. */
+  isTimeout?: boolean;
   cause?: unknown;
 }
 
@@ -73,6 +93,7 @@ export class ApiClientError extends Error {
   /** Cuerpo de error parseado de la API, si lo hubo. */
   readonly payload: ApiErrorBody | null;
   readonly isNetworkError: boolean;
+  readonly isTimeout: boolean;
 
   constructor(message: string, options: ApiClientErrorOptions) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
@@ -80,12 +101,27 @@ export class ApiClientError extends Error {
     this.status = options.status;
     this.payload = options.payload ?? null;
     this.isNetworkError = options.isNetworkError ?? false;
+    this.isTimeout = options.isTimeout ?? false;
   }
 }
 
 /** ¿El error se produjo por falta de conexión (no por una respuesta HTTP)? */
 export function isNetworkError(error: unknown): boolean {
   return error instanceof ApiClientError && error.isNetworkError;
+}
+
+/** ¿La petición se cortó porque venció el timeout? */
+export function isTimeoutError(error: unknown): boolean {
+  return error instanceof ApiClientError && error.isTimeout;
+}
+
+function createTimeoutError(cause?: unknown): ApiClientError {
+  return new ApiClientError(API_TIMEOUT_MESSAGE, {
+    status: 0,
+    isNetworkError: true,
+    isTimeout: true,
+    cause,
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -139,59 +175,84 @@ function errorMessage(payload: unknown, status: number): string {
  * @throws {ApiClientError} si la respuesta no es 2xx o si no hubo conexión.
  */
 export async function apiRequest<T>(url: string, options: ApiRequestOptions = {}): Promise<T> {
-  const { body, headers: rawHeaders, ...rest } = options;
+  const {
+    body,
+    headers: rawHeaders,
+    timeoutMs = API_REQUEST_TIMEOUT_MS,
+    signal: externalSignal,
+    ...rest
+  } = options;
   const headers = new Headers(rawHeaders);
   const serializedBody = serializeBody(body, headers);
+  const timeout = createRequestTimeout(timeoutMs, externalSignal);
 
-  let response: Response;
   try {
-    response = await fetch(url, { ...rest, headers, body: serializedBody });
-  } catch (error) {
-    if (error instanceof ApiClientError) throw error;
-    // Una cancelación no es un fallo: se propaga tal cual para que la capa que
-    // la pidió pueda ignorarla (y no se confunda con un corte de red).
-    if (rest.signal?.aborted || isAbortError(error)) throw error;
-    if (error instanceof TypeError) {
-      throw new ApiClientError('No se pudo conectar con el servidor', {
-        status: 0,
-        isNetworkError: true,
-        cause: error,
+    let response: Response;
+
+    try {
+      response = await raceWithAbort(
+        fetch(url, { ...rest, headers, body: serializedBody, signal: timeout.signal }),
+        timeout.signal,
+      );
+    } catch (error) {
+      if (error instanceof ApiClientError) throw error;
+      // Una cancelación no es un fallo: se propaga tal cual para que la capa
+      // que la pidió pueda ignorarla (y no se confunda con un corte de red).
+      if (externalSignal?.aborted) throw error;
+      if (timeout.timedOut()) throw createTimeoutError(error);
+      if (isAbortError(error)) throw error;
+      if (error instanceof TypeError) {
+        throw new ApiClientError('No se pudo conectar con el servidor', {
+          status: 0,
+          isNetworkError: true,
+          cause: error,
+        });
+      }
+      throw error;
+    }
+
+    // 204/205 no tienen cuerpo por definición.
+    if (response.status === 204 || response.status === 205) {
+      return undefined as T;
+    }
+
+    const text = await response.text();
+    const { payload, isEmpty } = parseBody(text);
+
+    if (!response.ok) {
+      // Los 5xx son fallos reales: se reportan con el x-request-id de la
+      // respuesta para correlacionar con el log del servidor. No se adjunta el
+      // cuerpo (puede contener datos del pedido o del cliente).
+      if (response.status >= 500) {
+        captureClientApiError(new Error(`Error HTTP ${response.status}`), {
+          route: routeFromUrl(url),
+          method: (options.method ?? 'GET').toUpperCase(),
+          status: response.status,
+          requestId: response.headers.get(REQUEST_ID_HEADER) ?? undefined,
+        });
+      }
+
+      throw new ApiClientError(errorMessage(payload, response.status), {
+        status: response.status,
+        payload: isRecord(payload) ? (payload as ApiErrorBody) : null,
       });
+    }
+
+    // Respuestas exitosas sin cuerpo (204 ya cubierto, pero también 200 vacío).
+    if (isEmpty) return undefined as T;
+
+    return payload as T;
+  } catch (error) {
+    // La lectura del cuerpo también puede abortarse si el timeout vence
+    // después de recibir los headers.
+    if (externalSignal?.aborted) throw error;
+    if (timeout.timedOut() && !(error instanceof ApiClientError && error.isTimeout)) {
+      throw createTimeoutError(error);
     }
     throw error;
+  } finally {
+    timeout.cleanup();
   }
-
-  // 204/205 no tienen cuerpo por definición.
-  if (response.status === 204 || response.status === 205) {
-    return undefined as T;
-  }
-
-  const text = await response.text();
-  const { payload, isEmpty } = parseBody(text);
-
-  if (!response.ok) {
-    // Los 5xx son fallos reales: se reportan con el x-request-id de la
-    // respuesta para correlacionar con el log del servidor. No se adjunta el
-    // cuerpo (puede contener datos del pedido o del cliente).
-    if (response.status >= 500) {
-      captureClientApiError(new Error(`Error HTTP ${response.status}`), {
-        route: routeFromUrl(url),
-        method: (options.method ?? 'GET').toUpperCase(),
-        status: response.status,
-        requestId: response.headers.get(REQUEST_ID_HEADER) ?? undefined,
-      });
-    }
-
-    throw new ApiClientError(errorMessage(payload, response.status), {
-      status: response.status,
-      payload: isRecord(payload) ? (payload as ApiErrorBody) : null,
-    });
-  }
-
-  // Respuestas exitosas sin cuerpo (204 ya cubierto, pero también 200 vacío).
-  if (isEmpty) return undefined as T;
-
-  return payload as T;
 }
 
 type RequestOptionsWithoutBody = Omit<ApiRequestOptions, 'method' | 'body'>;

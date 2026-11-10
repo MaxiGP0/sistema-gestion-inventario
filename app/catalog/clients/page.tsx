@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import { Suspense } from 'react';
-import { requireRolePage } from '@/lib/auth-page';
+import { requireCurrentRolePage } from '@/lib/auth-page';
 import { CLIENTS_PAGE_SIZE, getBrands, getClients } from '@/lib/catalog';
 import CatalogPageSkeleton from '../CatalogPageSkeleton';
 import ClientsBrowser from './ClientsBrowser';
@@ -33,7 +33,7 @@ export default function CatalogClientsPage({ searchParams }: CatalogClientsPageP
 }
 
 async function CatalogClientsContent({ searchParams }: CatalogClientsPageProps) {
-  const session = await requireRolePage(['admin', 'vendedor', 'controlador']);
+  const session = await requireCurrentRolePage(['admin', 'vendedor', 'controlador']);
 
   const params = await searchParams;
   const search = firstParam(params.search).trim();

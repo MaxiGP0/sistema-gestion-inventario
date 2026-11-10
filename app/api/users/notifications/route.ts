@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import dbConnect from '@/lib/mongodb';
-import { clearSessionCookie, requireCurrentSession, requireSession } from '@/lib/auth';
-import { resolveUserRole } from '@/lib/authz';
+import { clearSessionCookie, requireCurrentSession } from '@/lib/auth';
+import { invalidateCurrentSessionCache } from '@/lib/current-session-cache';
 import { User } from '@/models/User';
 import {
   defaultNotificationInbox,
@@ -28,24 +28,21 @@ import { withRouteLogging } from '@/lib/logger';
  */
 export const GET = withRouteLogging(async (request: Request) => {
   try {
-    const auth = requireSession(request);
+    const auth = await requireCurrentSession(request);
     if ('response' in auth) return auth.response;
 
     const parsedQuery = parseQueryParams(request, notificationQuerySchema);
     if (!parsedQuery.success) return parsedQuery.response;
 
-    await dbConnect();
-
-    const user = await User.findById(auth.session.userId)
-      .select('username role notificationsEnabled')
-      .lean();
-
+    // `requireCurrentSession` ya leyó (o tomó del caché) el estado actual:
+    // username, rol y preferencia salen de ese snapshot, sin otra consulta.
+    const user = auth.currentUser;
     if (!user) {
       return clearSessionCookie(errorResponse('Sesión inválida', 401));
     }
 
     const username = user.username || auth.session.username;
-    const role = resolveUserRole(user.role, username);
+    const role = user.role;
     // El vendedor no puede elegir una bandeja compartida: su vista siempre es
     // `vendor` y el filtro individual se aplica en listNotificationsForUser.
     const inbox =
@@ -111,6 +108,10 @@ export const PUT = withRouteLogging(async (request: Request) => {
     if (!user) {
       return clearSessionCookie(errorResponse('Sesión inválida', 401));
     }
+
+    // El GET de la bandeja y el SSE usan el snapshot de sesión: reflejar el
+    // cambio de preferencia de inmediato, sin esperar los 30-60 s del TTL.
+    invalidateCurrentSessionCache(auth.session.userId);
 
     const response: NotificationPreferenceResponse = {
       success: true,

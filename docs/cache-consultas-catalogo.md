@@ -52,9 +52,11 @@ en el precio del pedido.
   invalidación del servidor (`revalidateCatalog`, tags de Next) sigue
   existiendo en paralelo.
 - **Revalidación al volver a foco**: un único listener de
-  `focus`/`visibilitychange` invalida todo el catálogo y avisa a los hooks
-  suscriptores, que vuelven a consultar. Hay un cooldown de 1 s para evitar
-  duplicados cuando `focus` y `visibilitychange` se disparan juntos.
+  `focus`/`visibilitychange`/bfcache registra cuándo se ocultó la pestaña. Al
+  volver, sólo invalida todo el catálogo si estuvo oculta más de 30 s o si
+  alguna entrada venció por su TTL natural. Una ausencia corta conserva las
+  entradas frescas y no dispara búsquedas. `focus`/`pageshow` comparten el
+  mismo estado, así que varios eventos seguidos no duplican consultas.
 - `getCatalog` pide con `cache: 'no-cache'` para que, tras invalidar, el
   navegador no reutilice una copia HTTP vieja guardada por `max-age`.
 
@@ -86,6 +88,9 @@ sólo se completa y aplica la última.
 - `scripts/test-api-client.ts`: reenvío de `signal`, propagación de
   `AbortError` y helpers de cancelación.
 - `scripts/test-catalog-query.ts`: tipeo rápido sin resultados viejos,
-  aborto de la consulta anterior, deduplicación, TTL, invalidación, foco y
-  cabeceras.
+  aborto de la consulta anterior, deduplicación, TTL, invalidación, umbral de
+  foco/visibilidad y cabeceras.
+- `scripts/test-visibility-refresh.ts`: tracker compartido de
+  `useVisibilityRefresh` con reloj falso (ausencia corta, ausencia larga y
+  ventana mínima entre refrescos).
 - `scripts/measure-catalog-query.ts`: medición antes/después.

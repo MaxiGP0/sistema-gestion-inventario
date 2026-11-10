@@ -1,6 +1,13 @@
 import { expect, test, type Page } from '@playwright/test';
 import { CHANGE_PASSWORD_SUCCESS_MESSAGE } from '../lib/change-password-form';
-import { E2E_BRAND, E2E_CHANGED_PASSWORD, E2E_CLIENTS, E2E_PRODUCTS, E2E_USERS } from './fixtures';
+import {
+  E2E_BRAND,
+  E2E_CHANGED_PASSWORD,
+  E2E_CLIENTS,
+  E2E_PRODUCTS,
+  E2E_SECONDARY_BRAND,
+  E2E_USERS,
+} from './fixtures';
 import { clientIdByCode, deleteOrderAsAdmin, waitForReactHydration } from './helpers';
 
 /**
@@ -334,8 +341,8 @@ test.describe('Navegación móvil continua @ 390 px', () => {
       },
       {
         user: E2E_USERS.admin,
-        visible: ['panel', 'new', 'deposit', 'billing', 'account'],
-        hidden: ['orders', 'catalog'],
+        visible: ['panel', 'new', 'deposit', 'billing', 'backoffice'],
+        hidden: ['orders', 'catalog', 'account'],
       },
     ] as const;
 
@@ -657,7 +664,66 @@ test.describe('Catálogo y edición en backoffice @ 390 px', () => {
     await brandCard.getByRole('button', { name: 'Editar' }).click();
     await expect(page.getByTestId('brand-editing-indicator')).toBeVisible();
     await expect(page.getByTestId('brand-editing-indicator')).toContainText(E2E_BRAND.name);
-    await expect(page.getByPlaceholder('Ej: Capitalis, Algabó')).toBeFocused();
+    await expect(page.getByPlaceholder('Ej: NovaFarma, BioSalud')).toBeFocused();
+  });
+
+  test('el alta colapsada deja el buscador a la vista y se despliega al editar', async ({
+    page,
+  }) => {
+    await loginThroughUi(page, E2E_USERS.admin);
+
+    await page.goto('/backoffice/products');
+    const productSearch = page.getByPlaceholder('Buscar por código, nombre o marca...');
+    await expect(productSearch).toBeVisible();
+
+    const productSearchBox = await productSearch.boundingBox();
+    expect(productSearchBox).not.toBeNull();
+    expect(productSearchBox!.y).toBeLessThanOrEqual(350);
+
+    const firstProductCard = page.getByTestId('backoffice-product-card').first();
+    await expect(firstProductCard).toBeVisible();
+    const firstProductCardBox = await firstProductCard.boundingBox();
+    expect(firstProductCardBox).not.toBeNull();
+    expect(firstProductCardBox!.y).toBeLessThan(844);
+
+    // El formulario arranca plegado y se abre desde la barra compacta.
+    const productToggle = page.getByRole('button', { name: '+ Nuevo Producto' });
+    await expect(productToggle).toBeVisible();
+    await expect(productToggle).toHaveAttribute('aria-expanded', 'false');
+    await productToggle.click();
+    await expect(page.getByPlaceholder('Ej: C1020 o 5040')).toBeFocused();
+    await page.getByRole('button', { name: 'Ocultar formulario' }).click();
+    await expect(productToggle).toBeVisible();
+    await expect(page.getByPlaceholder('Ej: C1020 o 5040')).toBeHidden();
+
+    // "Editar" abre el formulario automáticamente y conserva el foco.
+    await firstProductCard.getByRole('button', { name: 'Editar' }).click();
+    await expect(page.getByTestId('product-editing-indicator')).toBeVisible();
+    await expect(page.getByPlaceholder('Ej: C1020 o 5040')).toBeFocused();
+    await page.getByRole('button', { name: 'Cancelar edición' }).click();
+    await expect(productToggle).toBeVisible();
+
+    await page.goto('/backoffice/clients');
+    const clientSearch = page.getByPlaceholder(
+      'Buscar por código, nombre, localidad, provincia...',
+    );
+    await expect(clientSearch).toBeVisible();
+    const clientSearchBox = await clientSearch.boundingBox();
+    expect(clientSearchBox).not.toBeNull();
+    expect(clientSearchBox!.y).toBeLessThanOrEqual(350);
+
+    const firstClientCard = page.getByTestId('backoffice-client-card').first();
+    await expect(firstClientCard).toBeVisible();
+    const firstClientCardBox = await firstClientCard.boundingBox();
+    expect(firstClientCardBox).not.toBeNull();
+    expect(firstClientCardBox!.y).toBeLessThan(844);
+
+    const clientToggle = page.getByRole('button', { name: '+ Nuevo Cliente' });
+    await expect(clientToggle).toBeVisible();
+    await clientToggle.click();
+    await expect(page.getByPlaceholder('Ej: CLI001')).toBeFocused();
+    await page.getByRole('button', { name: 'Ocultar formulario' }).click();
+    await expect(clientToggle).toBeVisible();
   });
 
   test('edita los descuentos desde la tarjeta móvil y conserva el scroll', async ({ page }) => {
@@ -688,7 +754,13 @@ test.describe('Catálogo y edición en backoffice @ 390 px', () => {
         .getByTestId('backoffice-client-card')
         .filter({ hasText: E2E_CLIENTS.fullFlow.code });
       await expect(card).toBeVisible();
-      await card.scrollIntoViewIfNeeded();
+
+      // El alta plegada acorta la página: forzamos un scroll real hasta la
+      // tarjeta para seguir verificando que la edición rápida no lo pierde.
+      await card.evaluate((element) => {
+        const top = element.getBoundingClientRect().top + window.scrollY;
+        window.scrollTo(0, Math.max(0, top - 120));
+      });
 
       await card.getByRole('button', { name: 'Cambiar descuentos' }).click();
 
@@ -751,6 +823,12 @@ test.describe('Catálogo y edición en backoffice @ 390 px', () => {
       'page',
     );
     await expect(page.getByTestId('mobile-bottom-nav')).toBeVisible();
+    await expect(page.getByTestId('mobile-nav-backoffice')).toHaveAttribute(
+      'href',
+      '/backoffice/products',
+    );
+    await expect(page.getByTestId('mobile-nav-backoffice')).toHaveAttribute('aria-current', 'page');
+    await expect(page.getByTestId('mobile-nav-account')).toHaveCount(0);
     await expectNoHorizontalOverflow(page, 'backoffice productos con pestañas @ 390px');
 
     await page.getByTestId('backoffice-tab-clients').click();
@@ -983,8 +1061,9 @@ test.describe('Borrador y cliente combinados desde el catálogo @ 390 px', () =>
     await expect(selectedFilter).toHaveText('Seleccionados (2)');
     await expect(selectedFilter).toHaveAttribute('aria-pressed', 'true');
 
-    const primaryCard = page.locator('.cv-product-card').filter({ hasText: products[0].code });
-    const secondaryCard = page.locator('.cv-product-card').filter({ hasText: products[1].code });
+    const orderCards = page.getByTestId('order-catalog-product-card');
+    const primaryCard = orderCards.filter({ hasText: products[0].code });
+    const secondaryCard = orderCards.filter({ hasText: products[1].code });
     await expect(primaryCard).toBeVisible();
     await expect(secondaryCard).toBeVisible();
 
@@ -1027,14 +1106,12 @@ test.describe('Borrador y cliente combinados desde el catálogo @ 390 px', () =>
     await expect(restoredFilter).toHaveText('Seleccionados (2)');
     await expect(restoredFilter).toHaveAttribute('aria-pressed', 'true');
     await expect(
-      page
-        .locator('.cv-product-card')
+      orderCards
         .filter({ hasText: products[0].code })
         .getByRole('spinbutton', { name: /^Cantidad en el catálogo de/ }),
     ).toHaveValue('4');
     await expect(
-      page
-        .locator('.cv-product-card')
+      orderCards
         .filter({ hasText: products[1].code })
         .getByRole('spinbutton', { name: /^Cantidad en el catálogo de/ }),
     ).toHaveValue('1');
@@ -1166,6 +1243,102 @@ test.describe('Notificación privada del vendedor @ 360 px', () => {
       await expectNoHorizontalOverflow(page, 'detalle abierto desde la campana @360px');
     } finally {
       await deleteOrderAsAdmin(request, orderId);
+    }
+  });
+});
+
+test.describe('Campana en vivo por SSE @ 390 px', () => {
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test('el alta del vendedor actualiza la campana sin un GET extra de la bandeja', async ({
+    page,
+    request,
+  }) => {
+    let orderId: string | undefined;
+    let notificationGets = 0;
+
+    page.on('request', (requestEvent) => {
+      if (
+        requestEvent.method() === 'GET' &&
+        new URL(requestEvent.url()).pathname === '/api/users/notifications'
+      ) {
+        notificationGets += 1;
+      }
+    });
+
+    try {
+      const initialInbox = page.waitForResponse(
+        (response) =>
+          response.request().method() === 'GET' &&
+          new URL(response.url()).pathname === '/api/users/notifications',
+        { timeout: 30_000 },
+      );
+      const sseResponse = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === '/api/events' && response.status() === 200,
+        { timeout: 30_000 },
+      );
+
+      await loginThroughUi(page, E2E_USERS.deposit);
+      await initialInbox;
+      expect((await sseResponse).status()).toBe(200);
+
+      // La bandeja queda abierta antes del alta: sin el payload SSE, la alerta
+      // recién aparecería con el polling de seguridad (60 s con SSE sano).
+      await page.getByRole('button', { name: /^Abrir bandeja de notificaciones/ }).click();
+      const dialog = page.getByRole('dialog', { name: 'Notificaciones' });
+      await expect(dialog).toBeVisible();
+
+      // Deja asentar la carga inicial (y un posible doble efecto de dev) antes
+      // de tomar la línea base de requests.
+      await page.waitForTimeout(1_000);
+      const baselineGets = notificationGets;
+
+      const login = await request.post('/api/auth/login', { data: E2E_USERS.seller });
+      expect(login.status()).toBe(200);
+
+      const clientsResponse = await request.get(
+        `/api/clients?search=${encodeURIComponent(E2E_CLIENTS.realtime.code)}&limit=20`,
+      );
+      expect(clientsResponse.status()).toBe(200);
+      const clients = (await clientsResponse.json()) as {
+        clients: Array<{ _id: string; code: string }>;
+      };
+      const client = clients.clients.find((item) => item.code === E2E_CLIENTS.realtime.code);
+      expect(client).toBeTruthy();
+
+      const productsResponse = await request.get(
+        `/api/products?search=${encodeURIComponent(E2E_PRODUCTS.secondary.code)}&limit=20`,
+      );
+      expect(productsResponse.status()).toBe(200);
+      const products = (await productsResponse.json()) as {
+        products: Array<{ _id: string; code: string }>;
+      };
+      const product = products.products.find((item) => item.code === E2E_PRODUCTS.secondary.code);
+      expect(product).toBeTruthy();
+
+      const creation = await request.post('/api/orders', {
+        data: {
+          clientId: client!._id,
+          items: [{ productId: product!._id, requestedQuantity: 1 }],
+          invoiceType: 'A',
+          paymentCondition: 'contado',
+          clientRequestId: `e2e-sse-bell-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        },
+      });
+      expect(creation.status()).toBe(200);
+      orderId = ((await creation.json()) as { order: { _id: string } }).order._id;
+
+      const alert = dialog
+        .locator('[data-notification-item="true"]')
+        .filter({ hasText: 'Nuevo Pedido (Borrador)' })
+        .filter({ hasText: E2E_CLIENTS.realtime.name })
+        .first();
+
+      await expect(alert).toBeVisible({ timeout: 15_000 });
+      expect(notificationGets).toBe(baselineGets);
+    } finally {
+      if (orderId) await deleteOrderAsAdmin(request, orderId);
     }
   });
 });
@@ -1356,6 +1529,346 @@ test.describe('Búsqueda de pedidos por prefijo @ 390 px', () => {
   });
 });
 
+test.describe('Búsqueda persistente y badge de borrador @ 390 px', () => {
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test('Volver conserva la búsqueda y el catálogo refleja el borrador en la barra', async ({
+    page,
+    request,
+  }) => {
+    await loginThroughUi(page, E2E_USERS.seller);
+    const productId = await productIdByCode(page, E2E_PRODUCTS.primary.code);
+
+    const matchingOrderId = await createMobileErgonomicsOrder(
+      page,
+      E2E_CLIENTS.mobileControl.code,
+      [{ productId, requestedQuantity: 1 }],
+    );
+    const otherOrderId = await createMobileErgonomicsOrder(page, E2E_CLIENTS.realtime.code, [
+      { productId, requestedQuantity: 1 },
+    ]);
+
+    try {
+      await page.goto('/orders');
+      await expect(page.getByRole('heading', { name: 'Historial de Mis Pedidos' })).toBeVisible();
+
+      const search = page.getByPlaceholder('Buscar por cliente, producto, código o #pedido...');
+      await waitForReactHydration(
+        page,
+        'input[placeholder="Buscar por cliente, producto, código o #pedido..."]',
+      );
+
+      const searchResponse = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          url.pathname === '/api/orders' &&
+          response.request().method() === 'GET' &&
+          url.searchParams.get('search') === 'Mobile Control'
+        );
+      });
+
+      await search.fill('Mobile Control');
+      expect((await searchResponse).status()).toBe(200);
+
+      const matchingCard = page.locator(
+        `[data-order-card="true"][data-order-id="${matchingOrderId}"]`,
+      );
+      const otherCard = page.locator(`[data-order-card="true"][data-order-id="${otherOrderId}"]`);
+
+      await expect(matchingCard).toBeVisible();
+      await expect(otherCard).toHaveCount(0);
+      await expect(page).toHaveURL(/[?&]search=Mobile(\+|%20)Control/);
+
+      // El detalle lee los filtros guardados por la bandeja: "Volver" debe
+      // restaurar el término, no sólo estado/fecha/archivados.
+      await matchingCard.getByRole('heading', { name: E2E_CLIENTS.mobileControl.name }).click();
+      await expect(page).toHaveURL(new RegExp(`/orders/${matchingOrderId}$`));
+      await page.getByRole('button', { name: 'Volver', exact: true }).click();
+
+      await expect(page).toHaveURL(/\/orders\?[^#]*search=Mobile(\+|%20)Control/);
+      await expect(search).toHaveValue('Mobile Control');
+      await expect(matchingCard).toBeVisible();
+      await expect(otherCard).toHaveCount(0);
+
+      // El borrador activo se ve en el tab "Nuevo" sin cambiar el ancho de la
+      // barra: el badge se posiciona sobre el ícono, fuera del flujo.
+      await page.goto('/catalog');
+      await expect(page.getByRole('heading', { name: 'Catálogo de Productos' })).toBeVisible();
+      await page.waitForLoadState('networkidle');
+
+      const nav = page.getByTestId('mobile-bottom-nav');
+      const newTab = nav.getByTestId('mobile-nav-new');
+      const widthBefore = (await newTab.boundingBox())?.width ?? 0;
+      await expect(nav.getByTestId('mobile-nav-draft-badge')).toHaveCount(0);
+
+      const productCard = page
+        .getByTestId('catalog-product-cards')
+        .filter({ hasText: E2E_PRODUCTS.primary.code });
+      await expect(productCard).toBeVisible();
+      await productCard
+        .getByRole('button', { name: `+ Pedido: ${E2E_PRODUCTS.primary.name}`, exact: true })
+        .click();
+
+      const badge = nav.getByTestId('mobile-nav-draft-badge');
+      await expect(badge).toBeVisible();
+      await expect(badge).toHaveText('1');
+
+      const widthAfter = (await newTab.boundingBox())?.width ?? 0;
+      expect(widthAfter).toBe(widthBefore);
+      await expectNoHorizontalOverflow(page, 'catálogo con badge de borrador @390px');
+    } finally {
+      await deleteOrderAsAdmin(request, matchingOrderId);
+      await deleteOrderAsAdmin(request, otherOrderId);
+    }
+  });
+});
+
+test.describe('Revalidación al volver a foco @ 390 px', () => {
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test('una ausencia corta no consulta y una larga revalida el detalle', async ({
+    page,
+    request,
+  }) => {
+    // Reloj y visibilidad controlados: el test no espera 40 s reales ni depende
+    // de que el navegador emita visibilitychange al cambiar de pestaña.
+    await page.addInitScript(() => {
+      const realNow = Date.now.bind(Date);
+      let offset = 0;
+      let hidden = false;
+
+      Object.defineProperty(window, '__setVisibilityOffset', {
+        configurable: true,
+        value: (ms: number) => {
+          offset = ms;
+        },
+      });
+      Object.defineProperty(window, '__setDocumentHidden', {
+        configurable: true,
+        value: (value: boolean) => {
+          hidden = value;
+          document.dispatchEvent(new Event('visibilitychange'));
+        },
+      });
+
+      Date.now = () => realNow() + offset;
+      Object.defineProperty(document, 'hidden', {
+        configurable: true,
+        get: () => hidden,
+      });
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        get: () => (hidden ? 'hidden' : 'visible'),
+      });
+    });
+
+    await loginThroughUi(page, E2E_USERS.seller);
+    const productId = await productIdByCode(page, E2E_PRODUCTS.primary.code);
+    const orderId = await createMobileErgonomicsOrder(page, E2E_CLIENTS.mobileControl.code, [
+      { productId, requestedQuantity: 1 },
+    ]);
+
+    try {
+      let detailRequests = 0;
+      const detailPath = `/api/orders/${orderId}`;
+
+      page.on('request', (requestEvent) => {
+        if (
+          requestEvent.method() === 'GET' &&
+          new URL(requestEvent.url()).pathname === detailPath
+        ) {
+          detailRequests += 1;
+        }
+      });
+
+      await page.goto(`/orders/${orderId}`);
+      await expect(page.getByRole('button', { name: 'Volver', exact: true })).toBeVisible();
+      await page.waitForTimeout(500);
+      const baseline = detailRequests;
+
+      await page.evaluate(() =>
+        (window as Window & { __setDocumentHidden: (value: boolean) => void }).__setDocumentHidden(
+          true,
+        ),
+      );
+      await page.waitForTimeout(2_000);
+      await page.evaluate(() =>
+        (window as Window & { __setDocumentHidden: (value: boolean) => void }).__setDocumentHidden(
+          false,
+        ),
+      );
+      await page.waitForTimeout(1_000);
+
+      expect(detailRequests, 'una ausencia de 2 s no debe disparar un GET nuevo del detalle').toBe(
+        baseline,
+      );
+
+      await page.evaluate(() =>
+        (window as Window & { __setDocumentHidden: (value: boolean) => void }).__setDocumentHidden(
+          true,
+        ),
+      );
+      await page.evaluate(() =>
+        (
+          window as unknown as { __setVisibilityOffset: (ms: number) => void }
+        ).__setVisibilityOffset(40_000),
+      );
+      await page.evaluate(() =>
+        (window as Window & { __setDocumentHidden: (value: boolean) => void }).__setDocumentHidden(
+          false,
+        ),
+      );
+
+      await expect.poll(() => detailRequests, { timeout: 10_000 }).toBeGreaterThan(baseline);
+    } finally {
+      await deleteOrderAsAdmin(request, orderId);
+    }
+  });
+});
+
+test.describe('Modo manos libres en depósito @ 390 px', () => {
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test('activa pantalla encendida, la persiste y libera el sentinel al salir', async ({
+    page,
+    request,
+  }) => {
+    await page.addInitScript(() => {
+      interface FakeSentinel {
+        released: boolean;
+        releaseCalls: number;
+        release: () => Promise<void>;
+        addEventListener: (type: string, listener: () => void) => void;
+        removeEventListener: (type: string, listener: () => void) => void;
+      }
+
+      const requests: string[] = [];
+      const sentinels: FakeSentinel[] = [];
+
+      const fakeWakeLock = {
+        request: async (type: string) => {
+          requests.push(type);
+          const listeners = new Set<() => void>();
+          const sentinel: FakeSentinel = {
+            released: false,
+            releaseCalls: 0,
+            async release() {
+              sentinel.releaseCalls += 1;
+              if (sentinel.released) return;
+              sentinel.released = true;
+              for (const listener of listeners) listener();
+            },
+            addEventListener(listenerType, listener) {
+              if (listenerType === 'release') listeners.add(listener);
+            },
+            removeEventListener(listenerType, listener) {
+              if (listenerType === 'release') listeners.delete(listener);
+            },
+          };
+          sentinels.push(sentinel);
+          return sentinel;
+        },
+      };
+
+      const define = (target: object, property: string, value: unknown): boolean => {
+        try {
+          Object.defineProperty(target, property, { configurable: true, value });
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      if (!define(navigator, 'wakeLock', fakeWakeLock)) {
+        define(Navigator.prototype, 'wakeLock', fakeWakeLock);
+      }
+
+      Object.defineProperty(window, '__wakeLockTest', {
+        configurable: true,
+        value: { requests, sentinels },
+      });
+    });
+
+    await loginThroughUi(page, E2E_USERS.seller);
+    const productId = await productIdByCode(page, E2E_PRODUCTS.primary.code);
+    const orderId = await createMobileErgonomicsOrder(page, E2E_CLIENTS.mobileControl.code, [
+      { productId, requestedQuantity: 2 },
+    ]);
+
+    try {
+      await loginThroughUi(page, E2E_USERS.deposit);
+      await page.goto(`/deposit/orders/${orderId}`);
+      await waitForReactHydration(page, '[data-testid="keep-awake-toggle"]');
+
+      const toggle = page.getByTestId('keep-awake-toggle');
+      await expect(toggle).toBeVisible();
+      await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+
+      const box = await toggle.boundingBox();
+      expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
+      expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+
+      await toggle.click();
+      await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () =>
+              (window as Window & { __wakeLockTest?: { requests: string[] } }).__wakeLockTest
+                ?.requests.length ?? 0,
+          ),
+        )
+        .toBe(1);
+
+      expect(await page.evaluate(() => window.localStorage.getItem('sgi_keep_awake'))).toBe('1');
+
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () =>
+              (window as Window & { __wakeLockTest?: { sentinels: unknown[] } }).__wakeLockTest
+                ?.sentinels.length ?? 0,
+          ),
+        )
+        .toBe(1);
+
+      // La navegación de "Volver" es client-side: desmonta el detalle y el hook
+      // debe liberar el sentinel en su cleanup.
+      await page.getByRole('button', { name: 'Volver', exact: true }).click();
+      await expect(page).toHaveURL(/\/deposit\/orders$/);
+
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () =>
+              (
+                window as Window & {
+                  __wakeLockTest?: {
+                    sentinels: Array<{ released: boolean; releaseCalls: number }>;
+                  };
+                }
+              ).__wakeLockTest?.sentinels[0]?.released ?? false,
+          ),
+        )
+        .toBe(true);
+
+      expect(
+        await page.evaluate(
+          () =>
+            (
+              window as Window & {
+                __wakeLockTest?: { sentinels: Array<{ releaseCalls: number }> };
+              }
+            ).__wakeLockTest?.sentinels[0]?.releaseCalls ?? 0,
+        ),
+      ).toBeGreaterThanOrEqual(1);
+    } finally {
+      await deleteOrderAsAdmin(request, orderId);
+    }
+  });
+});
+
 async function productIdByCode(page: Page, code: string): Promise<string> {
   const response = await page.request.get(
     `/api/products?search=${encodeURIComponent(code)}&limit=20`,
@@ -1454,7 +1967,7 @@ test.describe('Fluidez móvil de pedidos a 390 px', () => {
       await page.goto('/deposit/orders');
       await page.goto(`/deposit/orders/${orderId}`);
 
-      const filters = page.getByTestId('deposit-line-filters');
+      const filters = page.getByTestId('line-filter-bar');
       await expect(filters).toBeVisible();
       await expect(page.getByTestId('line-filter-all')).toHaveText('Todas (6)');
       await expect(page.getByTestId('line-filter-pending')).toHaveText('Pendientes (6)');
@@ -1617,6 +2130,78 @@ test.describe('Fluidez móvil de pedidos a 390 px', () => {
     }
   });
 
+  test('filtro por marca en el pedido y badge de producto ya cargado al agregar', async ({
+    page,
+    request,
+  }) => {
+    await loginThroughUi(page, E2E_USERS.seller);
+    const [primaryId, secondaryId, otherBrandId] = await Promise.all([
+      productIdByCode(page, E2E_PRODUCTS.primary.code),
+      productIdByCode(page, E2E_PRODUCTS.secondary.code),
+      productIdByCode(page, E2E_PRODUCTS.otherBrand.code),
+    ]);
+
+    // 4 líneas de E2E Laboratorio y 2 de E2E Segunda Marca para que aparezcan
+    // los chips de marca y el pedido tenga más de 5 líneas.
+    const orderId = await createMobileErgonomicsOrder(page, E2E_CLIENTS.mobileControl.code, [
+      { productId: primaryId, requestedQuantity: 2 },
+      { productId: secondaryId, requestedQuantity: 1 },
+      { productId: primaryId, requestedQuantity: 2 },
+      { productId: secondaryId, requestedQuantity: 1 },
+      { productId: otherBrandId, requestedQuantity: 4 },
+      { productId: otherBrandId, requestedQuantity: 1 },
+    ]);
+
+    try {
+      await loginThroughUi(page, E2E_USERS.deposit);
+      await page.goto(`/deposit/orders/${orderId}`);
+
+      const brandFilters = page.getByTestId('line-brand-filters');
+      await expect(brandFilters).toBeVisible();
+      await expect(
+        brandFilters.getByRole('button', { name: `${E2E_SECONDARY_BRAND.name} (2)` }),
+      ).toBeVisible();
+
+      await brandFilters.getByRole('button', { name: `${E2E_SECONDARY_BRAND.name} (2)` }).click();
+      await expect(
+        brandFilters.getByRole('button', { name: `${E2E_SECONDARY_BRAND.name} (2)` }),
+      ).toHaveAttribute('aria-pressed', 'true');
+
+      const cards = page.getByTestId('deposit-item-card');
+      await expect(cards).toHaveCount(2);
+      await expect(cards.first()).toContainText(E2E_PRODUCTS.otherBrand.code);
+
+      // El filtro de marca convive con el chip de estado.
+      await page.getByTestId('line-filter-pending').click();
+      await expect(cards).toHaveCount(2);
+
+      await page.getByRole('button', { name: 'Agregar Producto' }).click();
+      const dialog = page.getByRole('dialog', { name: 'Agregar Producto al Pedido' });
+      await expect(dialog).toBeVisible();
+
+      const addBrandFilters = dialog.getByTestId('add-product-brand-filters');
+      await expect(addBrandFilters).toBeVisible();
+      await addBrandFilters.getByRole('button', { name: E2E_SECONDARY_BRAND.name }).click();
+      await expect(
+        addBrandFilters.getByRole('button', { name: E2E_SECONDARY_BRAND.name }),
+      ).toHaveAttribute('aria-pressed', 'true');
+
+      const search = dialog.getByPlaceholder('Buscar por código o nombre...');
+      await search.fill(E2E_PRODUCTS.otherBrand.code);
+
+      const productRow = dialog
+        .getByRole('button', { name: new RegExp(E2E_PRODUCTS.otherBrand.code) })
+        .first();
+      await expect(productRow).toBeVisible();
+      await expect(productRow.getByTestId('add-product-in-order-badge')).toHaveText(
+        'En el pedido: 4 u.',
+      );
+      await expect(productRow.getByText('+ Sumar', { exact: true })).toBeVisible();
+    } finally {
+      await deleteOrderAsAdmin(request, orderId);
+    }
+  });
+
   test('comentario sin redirección, post-control optimista y facturado en móvil', async ({
     page,
     request,
@@ -1649,7 +2234,7 @@ test.describe('Fluidez móvil de pedidos a 390 px', () => {
       await page.waitForLoadState('networkidle');
       await expect(page.getByRole('heading', { name: /Datos Estructurados/ })).toBeVisible();
 
-      await expect(page.getByTestId('billing-line-filters')).toBeVisible();
+      await expect(page.getByTestId('line-filter-bar')).toBeVisible();
       await expect(page.getByTestId('line-filter-pending')).toHaveText('Pendientes (6)');
       await expect(page.getByTestId('line-filter-difference')).toHaveText(
         'Con diferencia / Faltantes (0)',
@@ -1759,6 +2344,97 @@ test.describe('Fluidez móvil de pedidos a 390 px', () => {
       await deleteOrderAsAdmin(request, orderId);
     }
   });
+
+  test('facturación no marca faltante una línea al 100% y copia los datos', async ({
+    page,
+    request,
+  }) => {
+    await page.addInitScript(() => {
+      const state: { copied: string[] } = { copied: [] };
+      (window as Window & { __billingCopyTest?: typeof state }).__billingCopyTest = state;
+
+      const fakeClipboard = {
+        writeText: async (text: string) => {
+          state.copied.push(text);
+        },
+      };
+
+      const define = (target: object, property: string, value: unknown): boolean => {
+        try {
+          Object.defineProperty(target, property, { configurable: true, value });
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      if (!define(navigator, 'clipboard', fakeClipboard)) {
+        define(Navigator.prototype, 'clipboard', fakeClipboard);
+      }
+    });
+
+    await loginThroughUi(page, E2E_USERS.seller);
+    const [clientId, productId] = await Promise.all([
+      clientIdByCode(page, E2E_CLIENTS.mobileControl.code),
+      productIdByCode(page, E2E_PRODUCTS.primary.code),
+    ]);
+
+    const creation = await page.request.post('/api/orders', {
+      data: {
+        clientId,
+        items: [{ productId, requestedQuantity: 2, customDiscount: 100 }],
+        invoiceType: 'A',
+        paymentCondition: 'contado',
+        clientRequestId: `e2e-billing-full-discount-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      },
+    });
+    expect(creation.status()).toBe(200);
+    const orderId = ((await creation.json()) as { order: { _id: string } }).order._id;
+
+    try {
+      await loginThroughUi(page, E2E_USERS.deposit);
+      await advanceOrderToBilling(page, orderId);
+
+      await loginThroughUi(page, E2E_USERS.billing);
+      await page.goto(`/billing/orders/${orderId}`);
+      await expect(page.getByRole('heading', { name: /Datos Estructurados/ })).toBeVisible();
+
+      // Modo manos libres disponible durante el control post-factura.
+      const keepAwakeToggle = page.getByTestId('keep-awake-toggle');
+      await expect(keepAwakeToggle).toBeVisible();
+      const keepAwakeBox = await keepAwakeToggle.boundingBox();
+      expect(keepAwakeBox?.height ?? 0).toBeGreaterThanOrEqual(44);
+
+      // La fila de acciones de la cabecera envuelve sin desbordar en 360 px.
+      await page.setViewportSize({ width: 360, height: 800 });
+      await expectNoHorizontalOverflow(page, 'cabecera de facturación @360px');
+      await page.setViewportSize({ width: 390, height: 844 });
+
+      const card = page
+        .getByTestId('billing-item-card')
+        .filter({ hasText: E2E_PRODUCTS.primary.code });
+      await expect(card).toHaveCount(1);
+      await expect(card).toContainText('100%');
+      await expect(card.getByRole('img', { name: E2E_PRODUCTS.primary.name })).toBeVisible();
+      await expect(card).not.toContainText(/sin controlar\/faltante/i);
+      await expect(card).not.toContainText('No verificado en depósito');
+      await expect(page.getByText(/sin controlar\/faltante/i)).toHaveCount(0);
+
+      await page.getByTestId('billing-copy-data').click();
+      await expect(page.getByText('Datos estructurados copiados al portapapeles.')).toBeVisible();
+
+      const copied = await page.evaluate(
+        () =>
+          (window as Window & { __billingCopyTest?: { copied: string[] } }).__billingCopyTest
+            ?.copied ?? [],
+      );
+      expect(copied).toHaveLength(1);
+      expect(copied[0]).toContain(E2E_PRODUCTS.primary.code);
+      expect(copied[0]).not.toContain('Sin controlar/faltante');
+    } finally {
+      await deleteOrderAsAdmin(request, orderId);
+    }
+  });
 });
 
 test.describe('Filtro de pendientes con línea activa @ 390 px', () => {
@@ -1790,7 +2466,7 @@ test.describe('Filtro de pendientes con línea activa @ 390 px', () => {
       await loginThroughUi(page, E2E_USERS.deposit);
       await page.goto(`/deposit/orders/${orderId}`);
 
-      const filters = page.getByTestId('deposit-line-filters');
+      const filters = page.getByTestId('line-filter-bar');
       await expect(filters).toBeVisible();
       await page.getByTestId('line-filter-pending').click();
       await expect(page.getByTestId('line-filter-pending')).toHaveText('Pendientes (6)');
@@ -1837,6 +2513,73 @@ test.describe('Filtro de pendientes con línea activa @ 390 px', () => {
       await page.getByTestId('line-filter-all').click();
       await expect(cards).toHaveCount(6);
       await expect(firstCard).toHaveCount(1);
+    } finally {
+      await deleteOrderAsAdmin(request, orderId);
+    }
+  });
+
+  test('la barra de filtros queda sticky al recorrer un pedido largo en depósito', async ({
+    page,
+    request,
+  }) => {
+    await loginThroughUi(page, E2E_USERS.seller);
+    const [primaryId, secondaryId, otherBrandId] = await Promise.all([
+      productIdByCode(page, E2E_PRODUCTS.primary.code),
+      productIdByCode(page, E2E_PRODUCTS.secondary.code),
+      productIdByCode(page, E2E_PRODUCTS.otherBrand.code),
+    ]);
+
+    // 12 líneas: la barra se monta (>5) y el scroll tiene suficiente recorrido
+    // para comprobar que queda pegada debajo del top bar.
+    const productIds = [primaryId, secondaryId, otherBrandId];
+    const orderId = await createMobileErgonomicsOrder(
+      page,
+      E2E_CLIENTS.mobileControl.code,
+      Array.from({ length: 12 }, (_, index) => ({
+        productId: productIds[index % productIds.length],
+        requestedQuantity: 1 + (index % 2),
+      })),
+    );
+
+    try {
+      await loginThroughUi(page, E2E_USERS.deposit);
+      await page.goto(`/deposit/orders/${orderId}`);
+
+      const filters = page.getByTestId('line-filter-bar');
+      await expect(filters).toBeVisible();
+
+      const cards = page.getByTestId('deposit-item-card');
+      await expect(cards).toHaveCount(12);
+
+      // La altura se mantiene compacta: chips de estado, chips de marca y
+      // buscador (44 px por fila) más el padding y el borde.
+      const initialBox = await filters.boundingBox();
+      expect(initialBox?.height ?? 0).toBeLessThanOrEqual(160);
+
+      for (const testId of ['line-filter-all', 'line-filter-search'] as const) {
+        const box = await page.getByTestId(testId).boundingBox();
+        expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+      }
+
+      await expect
+        .poll(() => filters.evaluate((element) => getComputedStyle(element).position))
+        .toBe('sticky');
+      await expect
+        .poll(() =>
+          cards.first().evaluate((element) => getComputedStyle(element).contentVisibility),
+        )
+        .toBe('auto');
+
+      // Baja hasta la última tarjeta y verifica que la barra sigue visible
+      // justo debajo del top bar (64 px), sin perderse con el scroll.
+      await cards.last().scrollIntoViewIfNeeded();
+      const stickyBox = await filters.boundingBox();
+      expect(stickyBox?.y ?? -1).toBeGreaterThanOrEqual(60);
+      expect(stickyBox?.y ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(68);
+
+      // La barra sigue siendo interactiva en esa posición.
+      await page.getByTestId('line-filter-pending').click();
+      await expect(page.getByTestId('line-filter-pending')).toHaveAttribute('aria-pressed', 'true');
     } finally {
       await deleteOrderAsAdmin(request, orderId);
     }
@@ -2289,8 +3032,41 @@ test.describe('Faltantes y archivado en el detalle del vendedor @ 390 px', () =>
       await expect(summary).toContainText('Pedido paralizado');
       await expect(summary).toContainText('1 línea con faltante');
 
+      // Atajo de respuesta: lleva al panel de comentarios y deja el campo
+      // enfocado para confirmar una respuesta rápida sin scrollear a mano.
+      const replyShortcut = summary.getByTestId('vendor-order-reply-shortcut');
+      await expect(replyShortcut).toBeVisible();
+      const commentBox = page.getByTestId('comment-textarea');
+      await replyShortcut.click();
+      await expect(commentBox).toBeFocused();
+      await page
+        .getByTestId('comment-quick-replies')
+        .getByRole('button', { name: 'Enviar lo disponible', exact: true })
+        .click();
+      await expect(commentBox).toHaveValue('Enviar lo disponible');
+
       const cards = page.getByTestId('vendor-order-item-card');
       await expect(cards).toHaveCount(6);
+
+      // La tarjeta móvil conserva la miniatura del producto poblado.
+      await expect(
+        cards
+          .filter({ hasText: E2E_PRODUCTS.primary.code })
+          .first()
+          .getByRole('img', { name: E2E_PRODUCTS.primary.name }),
+      ).toBeVisible();
+
+      // En 360 px los dos atajos del banner envuelven sin desbordar y
+      // mantienen 44 px de alto.
+      await page.setViewportSize({ width: 360, height: 800 });
+      await expectNoHorizontalOverflow(page, 'banner de faltantes @360px');
+      const [replyBox, filterBox] = await Promise.all([
+        replyShortcut.boundingBox(),
+        page.getByTestId('vendor-order-shortage-filter').boundingBox(),
+      ]);
+      expect(replyBox?.height ?? 0).toBeGreaterThanOrEqual(44);
+      expect(filterBox?.height ?? 0).toBeGreaterThanOrEqual(44);
+      await page.setViewportSize({ width: 390, height: 844 });
       const partialCard = cards.filter({ hasText: 'Faltante parcial (2 de 4)' });
       await expect(partialCard).toHaveCount(1);
       await expect(partialCard).toContainText('Faltante: 2 de 4 controlados');
@@ -2999,5 +3775,264 @@ test.describe('Administración móvil de precios @ 390 px', () => {
       await restoreProductPrices(page, primary);
       await restoreProductPrices(page, secondary);
     }
+  });
+});
+
+/**
+ * Deja en IndexedDB una escritura rechazada: el indicador global la muestra
+ * como "con error" y no la reenvía sola, así permanece visible durante todo el
+ * escenario sin depender de la red.
+ */
+async function seedFailedOfflineOrder(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open('sgi-offline', 2);
+      request.onupgradeneeded = () => {
+        const upgrade = request.result;
+        if (!upgrade.objectStoreNames.contains('order-queue')) {
+          upgrade.createObjectStore('order-queue', { keyPath: 'id' });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error ?? new Error('IndexedDB'));
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction('order-queue', 'readwrite');
+      const now = Date.now();
+      transaction.objectStore('order-queue').put({
+        id: 'create:e2e-floating-notices',
+        kind: 'create',
+        method: 'POST',
+        url: '/api/orders',
+        body: { clientRequestId: 'e2e-floating-notices' },
+        clientRequestId: 'e2e-floating-notices',
+        status: 'failed',
+        createdAt: now,
+        updatedAt: now,
+        attempts: 1,
+        lastError: 'Rechazo permanente simulado por el E2E',
+        lastStatus: 400,
+        clientName: 'Cliente flotante E2E',
+        total: 1000,
+      });
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error ?? new Error('IndexedDB'));
+    });
+
+    db.close();
+  });
+}
+
+/**
+ * Indicador offline + chip SSE + teclado virtual: comprueba que los avisos
+ * flotantes se apilan sin intersectarse y que, con un campo enfocado, la
+ * píldora no intercepta clics.
+ */
+async function expectFloatingNoticesStacked(page: Page): Promise<void> {
+  await loginThroughUi(page, E2E_USERS.seller);
+  await seedFailedOfflineOrder(page);
+
+  await page.goto('/orders');
+  await expect(page.getByRole('heading', { name: 'Historial de Mis Pedidos' })).toBeVisible();
+
+  const syncIndicator = page.getByTestId('offline-sync-indicator');
+  const syncIndicatorWrapper = page.getByTestId('offline-sync-indicator-wrapper');
+  await expect(syncIndicator).toBeVisible();
+  await expect(page.locator('html')).toHaveAttribute('data-offline-sync-visible', 'true');
+
+  // El evento SSE se republica como CustomEvent; con el buscador enfocado la
+  // bandeja lo acumula en el chip en vez de refrescar la lista bajo las manos.
+  const search = page.getByPlaceholder('Buscar por cliente, producto, código o #pedido...');
+  await waitForReactHydration(
+    page,
+    'input[placeholder="Buscar por cliente, producto, código o #pedido..."]',
+  );
+  await search.click();
+  await expect(search).toBeFocused();
+  await page.evaluate(() => {
+    window.dispatchEvent(
+      new CustomEvent('sgi:order-notification', {
+        detail: { targetRole: 'vendor', orderId: null },
+      }),
+    );
+  });
+
+  const chip = page.getByTestId('orders-tray-new-movements');
+  await expect(chip).toBeVisible();
+  await expect(page.locator('html')).toHaveAttribute('data-tray-chip-visible', 'true');
+
+  const syncBox = await syncIndicatorWrapper.boundingBox();
+  const chipBox = await chip.boundingBox();
+  expect(syncBox).not.toBeNull();
+  expect(chipBox).not.toBeNull();
+
+  if (!syncBox || !chipBox) return;
+
+  // Sin intersección: uno queda completamente por encima del otro.
+  expect(overlapArea(syncBox, chipBox)).toBe(0);
+  expect(syncBox.y + syncBox.height <= chipBox.y || chipBox.y + chipBox.height <= syncBox.y).toBe(
+    true,
+  );
+
+  // Ambos centros siguen perteneciendo a su propio botón.
+  expect(await buttonLabelAtCenter(page, syncBox)).toBe('Abrir cola de sincronización');
+  expect(await buttonLabelAtCenter(page, chipBox)).toBe(
+    'Actualizar la bandeja con los nuevos movimientos',
+  );
+
+  const viewport = page.viewportSize();
+  if (viewport) {
+    expect(chipBox.x).toBeGreaterThanOrEqual(0);
+    expect(chipBox.x + chipBox.width).toBeLessThanOrEqual(viewport.width);
+  }
+
+  // Teclado virtual: al enfocar el buscador de productos, la píldora offline
+  // se oculta y deja pasar los clics al campo.
+  await page.goto('/orders/new');
+  await expect(page.getByRole('heading', { name: /Nuevo pedido/ })).toBeVisible();
+  const productSearch = page.getByPlaceholder('Buscar producto por nombre o código...');
+  await waitForReactHydration(page, 'input[placeholder="Buscar producto por nombre o código..."]');
+
+  const html = page.locator('html');
+  // En WebKit el primer foco puede adelantarse al efecto que suscribe
+  // `focusin`: se repite el foco hasta que el hook refleje el estado.
+  await expect(async () => {
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await productSearch.click();
+    await expect(html).toHaveAttribute('data-mobile-keyboard', 'open', { timeout: 1_000 });
+  }).toPass({ timeout: 15_000 });
+  await expect(productSearch).toBeFocused();
+
+  await expect(syncIndicatorWrapper).toHaveCSS('opacity', '0');
+  await expect(syncIndicatorWrapper).toHaveCSS('pointer-events', 'none');
+
+  expect(
+    await page.evaluate(() => {
+      const indicator = document.querySelector('[data-testid="offline-sync-indicator-wrapper"]');
+      if (!indicator) return false;
+      const rect = indicator.getBoundingClientRect();
+      const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+      return hit?.closest('[data-testid="offline-sync-indicator-wrapper"]') !== null;
+    }),
+  ).toBe(false);
+
+  await productSearch.click();
+  await expect(productSearch).toBeFocused();
+
+  // Al cerrar el teclado la píldora vuelve y no se apoya sobre la barra de
+  // acciones primaria del alta.
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await expect(html).not.toHaveAttribute('data-mobile-keyboard', 'open');
+  await expect(syncIndicatorWrapper).toHaveCSS('opacity', '1');
+  await expect(syncIndicatorWrapper).toHaveCSS('pointer-events', 'auto');
+
+  const actionBar = page.getByTestId('mobile-order-action-bar');
+  await expect(actionBar).toBeVisible();
+  const actionBarBox = await actionBar.boundingBox();
+  const restoredSyncBox = await syncIndicatorWrapper.boundingBox();
+  if (actionBarBox && restoredSyncBox) {
+    expect(overlapArea(actionBarBox, restoredSyncBox)).toBe(0);
+  }
+}
+
+for (const viewport of [
+  { width: 360, height: 640 },
+  { width: 390, height: 844 },
+] as const) {
+  test.describe(`Avisos flotantes apilados @ ${viewport.width}px`, () => {
+    test.use({ viewport });
+
+    test('indicador offline, chip SSE y teclado virtual no se pisan', async ({ page }) => {
+      await expectFloatingNoticesStacked(page);
+    });
+  });
+}
+
+test.describe('Descuento por línea y limpieza de cliente @ 390 px', () => {
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test('edita el descuento desde el resumen y limpia la búsqueda de clientes con la X', async ({
+    page,
+  }) => {
+    const client = E2E_CLIENTS.fullFlow;
+    const product = E2E_PRODUCTS.primary;
+
+    await loginThroughUi(page, E2E_USERS.seller);
+    await page.goto('/orders/new');
+    await expect(page.getByRole('heading', { name: /Nuevo pedido/ })).toBeVisible();
+
+    // La hoja de clientes permite limpiar la búsqueda sin borrar carácter por
+    // carácter y devuelve el foco al campo para seguir escribiendo.
+    await page.getByRole('button', { name: /Seleccionar cliente/ }).click();
+    const clientDialog = page.getByRole('dialog');
+    await expect(clientDialog.getByRole('heading', { name: 'Seleccionar Cliente' })).toBeVisible();
+
+    const clientSearch = clientDialog.getByPlaceholder('Buscar por código, nombre o localidad...');
+    await clientSearch.fill(client.code);
+    await expect(clientSearch).toHaveValue(client.code);
+
+    const clearClientSearch = clientDialog.getByRole('button', {
+      name: 'Limpiar búsqueda de cliente',
+    });
+    await expect(clearClientSearch).toBeVisible();
+    const clearBox = await clearClientSearch.boundingBox();
+    expect(clearBox?.width ?? 0).toBeGreaterThanOrEqual(44);
+    expect(clearBox?.height ?? 0).toBeGreaterThanOrEqual(44);
+
+    await clearClientSearch.click();
+    await expect(clientSearch).toHaveValue('');
+    await expect(clientSearch).toBeFocused();
+    await expect(clearClientSearch).toHaveCount(0);
+
+    await clientSearch.fill(client.code);
+    await clientDialog
+      .getByRole('button', { name: new RegExp(`${client.code} - ${client.name}`) })
+      .click();
+    await expect(clientDialog).toBeHidden();
+
+    // Una línea con el descuento general del cliente (5% sobre $1000).
+    const productSearch = page.getByPlaceholder('Buscar producto por nombre o código...');
+    await productSearch.fill(product.code);
+    const card = page.locator('.cv-product-card').filter({ hasText: product.code });
+    await expect(card).toBeVisible();
+
+    const quantity = card.getByRole('spinbutton', {
+      name: /^Cantidad en el catálogo de/,
+    });
+    await quantity.fill('1');
+    await expect(quantity).toHaveValue('1');
+
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await page.evaluate(() => document.querySelector('nextjs-portal')?.remove());
+    await page.getByTestId('mobile-cart-button').click();
+
+    const summary = page.getByRole('dialog');
+    await expect(summary.getByRole('heading', { name: /Resumen y Guardar Pedido/ })).toBeVisible();
+
+    const line = summary.getByTestId('selected-order-item').filter({ hasText: product.code });
+    await expect(line.locator('img')).toBeVisible();
+    const finalTotal = summary.getByTestId('mobile-checkout-final-total');
+    await expect(finalTotal).toHaveText('$950.00');
+
+    // El descuento manual se edita en la misma línea del resumen, sin cerrarlo.
+    const discountChip = line.getByTestId('selected-order-item-discount-chip');
+    await expect(discountChip).toContainText('Desc. 5%');
+    await discountChip.click();
+
+    const discountInput = line.getByTestId('selected-order-item-discount-input');
+    await expect(discountInput).toBeVisible();
+    await expect(discountInput).toBeFocused();
+    await discountInput.fill('15');
+    await expect(discountInput).toHaveValue('15');
+    await expect(finalTotal).toHaveText('$850.00');
+    await expect(summary.getByText('Desc. manual por producto:', { exact: true })).toBeVisible();
+
+    // La X de la línea vuelve al descuento de marca/general del cliente.
+    await line
+      .getByRole('button', { name: `Restaurar descuento de marca para ${product.name}` })
+      .click();
+    await expect(line.getByTestId('selected-order-item-discount-chip')).toContainText('Desc. 5%');
+    await expect(finalTotal).toHaveText('$950.00');
   });
 });

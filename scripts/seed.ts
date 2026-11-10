@@ -6,7 +6,7 @@ import mongoose from 'mongoose';
 import dbConnect from '../lib/mongodb';
 import { roundCurrency } from '../lib/money';
 import { orderShortId } from '../lib/order-short-id';
-import { buildOrderSearchFields } from '../lib/search-normalize';
+import { buildOrderSearchFields, buildProductSearchFields } from '../lib/search-normalize';
 import { parseSeedUsers, type SeedUser } from '../lib/seed-users';
 import type { UserRole } from '../lib/authz';
 import type { InvoiceType, PaymentCondition } from '../lib/order-commercial';
@@ -1140,6 +1140,11 @@ async function seedProducts(brandsByName: Map<string, IBrand>): Promise<Map<stri
     }
 
     const priceWithIva = roundCurrency(item.price * 1.21);
+    const searchFields = buildProductSearchFields({
+      code: item.code,
+      name: item.name,
+      brandName: brand.name,
+    });
 
     const result = await Product.updateOne(
       { brandId: brand._id, code: item.code },
@@ -1154,6 +1159,7 @@ async function seedProducts(brandsByName: Map<string, IBrand>): Promise<Map<stri
           name: item.name,
           price: item.price,
           priceWithIva,
+          ...searchFields,
         },
       },
       { upsert: true },

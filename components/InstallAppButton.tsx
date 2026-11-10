@@ -129,7 +129,7 @@ export default function InstallAppButton() {
         </span>
         <div className="min-w-0">
           <p className="text-sm font-semibold">
-            Instalá Sistema de Gestión de Inventario en tu dispositivo
+            Instalá el Sistema de Gestión de Inventario en tu dispositivo
           </p>
           {state === 'prompt' ? (
             <p className="mt-0.5 text-xs text-muted">

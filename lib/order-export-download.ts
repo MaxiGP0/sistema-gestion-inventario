@@ -14,6 +14,8 @@ import {
   parseContentDispositionFilename,
   type OrderExportFormat,
 } from './order-export';
+import { LONG_REQUEST_TIMEOUT_MS } from './api-client';
+import { createRequestTimeout, raceWithAbort } from './request-timeout';
 
 export type OrderExportDelivery = 'shared' | 'downloaded' | 'cancelled';
 
@@ -145,34 +147,56 @@ export async function downloadOrderExport(
   format: OrderExportFormat,
   options: OrderExportDownloadOptions = {},
 ): Promise<OrderExportDownloadResult> {
-  let response: Response;
+  const timeout = createRequestTimeout(LONG_REQUEST_TIMEOUT_MS);
+  const timeoutMessage =
+    'La conexión tardó demasiado al exportar. Revisá tu señal e intentá de nuevo.';
 
   try {
-    response = await fetch(url, {
-      credentials: 'same-origin',
-      cache: 'no-store',
-    });
-  } catch {
-    throw new Error('No se pudo conectar con el servidor');
+    let response: Response;
+
+    try {
+      response = await raceWithAbort(
+        fetch(url, {
+          credentials: 'same-origin',
+          signal: timeout.signal,
+        }),
+        timeout.signal,
+      );
+    } catch {
+      throw new Error(timeout.timedOut() ? timeoutMessage : 'No se pudo conectar con el servidor');
+    }
+
+    if (!response.ok) {
+      throw new Error(await errorMessage(response));
+    }
+
+    const filename =
+      parseContentDispositionFilename(response.headers.get('content-disposition')) ??
+      buildOrderExportFilename(format);
+
+    let blob: Blob;
+    try {
+      blob = await response.blob();
+    } catch {
+      throw new Error(
+        timeout.timedOut() ? timeoutMessage : 'No se pudo descargar el archivo exportado',
+      );
+    }
+
+    // La descarga ya está en memoria: no se debe cortar la hoja nativa por el
+    // timeout de red.
+    timeout.cleanup();
+
+    if (options.share) {
+      const shared = await shareOrderExportFile(blob, filename, format, options.title ?? filename);
+
+      if (shared === 'shared') return { filename, delivery: 'shared' };
+      if (shared === 'cancelled') return { filename, delivery: 'cancelled' };
+    }
+
+    downloadBlob(blob, filename);
+    return { filename, delivery: 'downloaded' };
+  } finally {
+    timeout.cleanup();
   }
-
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-
-  const filename =
-    parseContentDispositionFilename(response.headers.get('content-disposition')) ??
-    buildOrderExportFilename(format);
-
-  const blob = await response.blob();
-
-  if (options.share) {
-    const shared = await shareOrderExportFile(blob, filename, format, options.title ?? filename);
-
-    if (shared === 'shared') return { filename, delivery: 'shared' };
-    if (shared === 'cancelled') return { filename, delivery: 'cancelled' };
-  }
-
-  downloadBlob(blob, filename);
-  return { filename, delivery: 'downloaded' };
 }

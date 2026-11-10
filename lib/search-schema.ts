@@ -99,6 +99,15 @@ async function patchUpdate(
     ...collectSources(targets, sourceFields),
   });
 
+  // Si el llamador ya calculó el array combinado (por ejemplo, la ruta de
+  // productos incluye el nombre de la marca), ese valor es la fuente de verdad
+  // y el hook no lo pisa con una versión parcial sin marca.
+  const providedTokenFields = new Set(
+    tokenFields.filter((field) =>
+      targets.some((target) => Object.prototype.hasOwnProperty.call(target, field)),
+    ),
+  );
+
   for (const target of targets) {
     const targetSources = sourceFields.filter((source) =>
       Object.prototype.hasOwnProperty.call(target, source),
@@ -114,6 +123,7 @@ async function patchUpdate(
     // Los arrays combinados (`searchTokens`) se recalculan una sola vez con
     // todos los orígenes, aunque el target sólo traiga uno de ellos.
     for (const field of tokenFields) {
+      if (providedTokenFields.has(field)) continue;
       if (computed[field] !== undefined) fields[field] = computed[field];
     }
 

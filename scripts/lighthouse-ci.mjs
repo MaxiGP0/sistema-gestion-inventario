@@ -249,13 +249,32 @@ function auditValue(lhr, auditId) {
 }
 
 function readLighthouseMetrics(lhr) {
+  const imageRequests =
+    lhr.audits['network-requests']?.details?.items?.filter(
+      (item) => item.resourceType === 'Image',
+    ) ?? [];
+  const imageBytes = imageRequests.reduce(
+    (total, item) => total + (Number(item.transferSize) || 0),
+    0,
+  );
+  const bfCacheAudit = lhr.audits['bf-cache'];
+  const bfCacheReasons =
+    bfCacheAudit?.details?.items
+      ?.map((item) => (typeof item.reason === 'string' ? item.reason : ''))
+      .filter(Boolean) ?? [];
+
   return {
     lcpMs: auditValue(lhr, 'largest-contentful-paint'),
     cls: Math.round(auditValue(lhr, 'cumulative-layout-shift') * 10_000) / 10_000,
     tbtMs: auditValue(lhr, 'total-blocking-time'),
     ttfbMs: auditValue(lhr, 'server-response-time'),
     fcpMs: auditValue(lhr, 'first-contentful-paint'),
+    imageBytes,
+    imageCount: imageRequests.length,
+    totalByteWeightBytes: auditValue(lhr, 'total-byte-weight'),
     performanceScore: Math.round((lhr.categories.performance?.score ?? 0) * 100),
+    bfCacheScore: typeof bfCacheAudit?.score === 'number' ? Math.round(bfCacheAudit.score) : null,
+    bfCacheReasons,
   };
 }
 
@@ -283,7 +302,9 @@ async function runLighthouse(url, chromePort) {
   if (!result) throw new Error(`Lighthouse no devolvió resultados para ${url}.`);
 
   const reports = Array.isArray(result.report) ? result.report : [result.report];
-  const html = reports.find((report) => report.trimStart().startsWith('<!doctype html>')) ?? '';
+  // El HTML de Lighthouse arranca con un comentario de licencia antes del
+  // doctype, así que no alcanza con `startsWith`.
+  const html = reports.find((report) => /<!doctype html>/i.test(report)) ?? '';
   const json = JSON.stringify(result.lhr, null, 2);
 
   return { lhr: result.lhr, html, json };
@@ -358,7 +379,7 @@ async function main() {
         writeFileSync(join(reportsDir, `${slug}.report.json`), json);
 
         console.log(
-          `[lighthouse] ${route.key}: LCP ${measurement.lcpMs} ms · CLS ${measurement.cls} · TBT ${measurement.tbtMs} ms · score ${measurement.performanceScore}`,
+          `[lighthouse] ${route.key}: LCP ${measurement.lcpMs} ms · CLS ${measurement.cls} · TBT ${measurement.tbtMs} ms · imágenes ${measurement.imageBytes} B (${measurement.imageCount}) · bf-cache ${measurement.bfCacheScore ?? 'n/a'} · score ${measurement.performanceScore}`,
         );
       }
 
@@ -368,7 +389,18 @@ async function main() {
         tbtMs: Math.round(median(samples.map((sample) => sample.tbtMs))),
         ttfbMs: Math.round(median(samples.map((sample) => sample.ttfbMs))),
         fcpMs: Math.round(median(samples.map((sample) => sample.fcpMs))),
+        imageBytes: Math.round(median(samples.map((sample) => sample.imageBytes))),
+        imageCount: Math.round(median(samples.map((sample) => sample.imageCount))),
+        totalByteWeightBytes: Math.round(
+          median(samples.map((sample) => sample.totalByteWeightBytes)),
+        ),
         performanceScore: Math.round(median(samples.map((sample) => sample.performanceScore))),
+        bfCacheScore: samples.every((sample) => sample.bfCacheScore === 1)
+          ? 1
+          : samples.every((sample) => sample.bfCacheScore === null)
+            ? null
+            : 0,
+        bfCacheReasons: [...new Set(samples.flatMap((sample) => sample.bfCacheReasons ?? []))],
       };
     }
 
@@ -391,6 +423,27 @@ async function main() {
       if (result.tbtMs > budget.tbtMs) {
         violations.push(`${route}: TBT ${result.tbtMs} ms > ${budget.tbtMs} ms.`);
       }
+      if (typeof budget.imageBytes === 'number' && result.imageBytes > budget.imageBytes) {
+        violations.push(
+          `${route}: imágenes ${result.imageBytes} B > ${budget.imageBytes} B (${result.imageCount} request(s)).`,
+        );
+      }
+      if (
+        typeof budget.totalByteWeightBytes === 'number' &&
+        result.totalByteWeightBytes > budget.totalByteWeightBytes
+      ) {
+        violations.push(
+          `${route}: peso total ${result.totalByteWeightBytes} B > ${budget.totalByteWeightBytes} B.`,
+        );
+      }
+      if (
+        result.bfCacheScore !== 1 &&
+        result.bfCacheReasons.some((reason) => /no-store/i.test(reason))
+      ) {
+        violations.push(
+          `${route}: bf-cache bloqueado por Cache-Control: no-store (${result.bfCacheReasons.join(' | ')}).`,
+        );
+      }
     }
 
     const summary = {
@@ -404,11 +457,11 @@ async function main() {
     writeFileSync(join(reportsDir, 'summary.json'), JSON.stringify(summary, null, 2));
 
     const lines = [
-      '| Ruta | LCP | CLS | TBT | TTFB | Score |',
-      '| --- | ---: | ---: | ---: | ---: | ---: |',
+      '| Ruta | LCP | CLS | TBT | TTFB | Imágenes | Peso total | bf-cache | Score |',
+      '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
       ...Object.entries(results).map(
         ([route, result]) =>
-          `| ${route} | ${result.lcpMs} ms | ${result.cls} | ${result.tbtMs} ms | ${result.ttfbMs} ms | ${result.performanceScore} |`,
+          `| ${route} | ${result.lcpMs} ms | ${result.cls} | ${result.tbtMs} ms | ${result.ttfbMs} ms | ${(result.imageBytes / 1024).toFixed(1)} KB (${result.imageCount}) | ${(result.totalByteWeightBytes / 1024).toFixed(1)} KB | ${result.bfCacheScore ?? 'n/a'} | ${result.performanceScore} |`,
       ),
     ];
 

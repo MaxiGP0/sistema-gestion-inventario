@@ -4,8 +4,13 @@
  * La consulta indexada exige que todos los tokens del término coincidan como
  * prefijo de alguna palabra del array multikey `searchTokens`
  * (`$all: [/^token1/, /^token2/]`). Así "ahorro" encuentra "Supermercado El
- * Ahorro" y "shampoo 400" encuentra "Shampoo Capitalis 400ml", sin importar la
+ * Ahorro" y "shampoo 400" encuentra "Shampoo NovaFarma 400ml", sin importar la
  * posición de las palabras.
+ *
+ * Los productos incluyen el nombre de su marca en `searchTokens`, por lo que
+ * "biosalud 400" se resuelve en una sola consulta al índice multikey. Las marcas
+ * resueltas aparte quedan para los documentos históricos que todavía no tienen
+ * los tokens de la marca.
  *
  * Los documentos históricos que todavía no tienen `searchTokens` conservan el
  * camino anterior (prefijo sobre los campos `search*` y, si tampoco existen,
@@ -14,7 +19,7 @@
  */
 
 import { escapeRegex } from './escape-regex';
-import { normalizeSearchText } from './search-normalize';
+import { normalizeSearchText, tokenizeSearchText } from './search-normalize';
 
 export interface PrefixSearchField {
   /** Campo normalizado indexado (minúsculas, sin acentos). */
@@ -60,8 +65,18 @@ export interface SearchToken {
   normalized: string;
 }
 
-/** Divide el término en tokens únicos; conserva el original para el fallback. */
-export function splitSearchTokens(term: string): SearchToken[] {
+/** Tope de costo por búsqueda: cantidad y longitud de tokens. */
+export const MAX_SEARCH_TOKENS = 8;
+export const MAX_SEARCH_TOKEN_LENGTH = 40;
+
+/**
+ * Divide el término en tokens únicos; conserva el original para el fallback.
+ *
+ * Una URL puede traer cientos de palabras o un token gigante: sólo se aceptan
+ * 8 tokens únicos de hasta 40 caracteres. Si no queda ninguno, devuelve `null`
+ * para que la consulta no genere regex ni documentos desproporcionados.
+ */
+export function splitSearchTokens(term: string): SearchToken[] | null {
   const tokens: SearchToken[] = [];
   const seen = new Set<string>();
 
@@ -70,12 +85,16 @@ export function splitSearchTokens(term: string): SearchToken[] {
     .split(/[^\p{L}\p{N}]+/u)
     .filter(Boolean)) {
     const normalized = normalizeSearchText(raw);
-    if (!normalized || seen.has(normalized)) continue;
+    if (!normalized || normalized.length > MAX_SEARCH_TOKEN_LENGTH || seen.has(normalized)) {
+      continue;
+    }
+
     seen.add(normalized);
     tokens.push({ raw, normalized });
+    if (tokens.length >= MAX_SEARCH_TOKENS) break;
   }
 
-  return tokens;
+  return tokens.length > 0 ? tokens : null;
 }
 
 /** Regex anclada que puede acotarse con un índice B-tree/multikey. */
@@ -131,7 +150,7 @@ export function buildTokenSearchFilter(
   tokenField = 'searchTokens',
 ): Record<string, unknown> | null {
   const tokens = splitSearchTokens(term);
-  if (tokens.length === 0) return null;
+  if (!tokens) return null;
 
   return {
     $or: [
@@ -166,9 +185,27 @@ export function buildPrefixSearchFilter(
   return { $or: conditions };
 }
 
-/** Filtro de marcas para resolver los `brandId` de una búsqueda de productos. */
+/**
+ * Filtro de marcas para resolver los `brandId` de una búsqueda de productos.
+ *
+ * A diferencia de la versión anterior, compara cada token del término contra el
+ * prefijo de `searchName`: buscar "biosalud 400" encuentra "BioSalud" porque el
+ * token "biosalud" coincide, aunque el término completo no sea un prefijo del
+ * nombre. Los documentos históricos conservan el regex `i` sobre `name`.
+ */
 export function buildBrandSearchFilter(term: string): Record<string, unknown> | null {
-  return buildPrefixSearchFilter(term, BRAND_SEARCH_FIELDS);
+  const tokens = splitSearchTokens(term);
+  if (!tokens) return null;
+
+  return {
+    $or: [
+      ...tokens.map(({ normalized }) => ({ searchName: buildTokenRegex(normalized) })),
+      ...tokens.map(({ raw }) => ({
+        searchName: { $exists: false },
+        name: buildLegacySearchRegex(raw),
+      })),
+    ],
+  };
 }
 
 /** Filtro de clientes: cada token por prefijo en nombre, código, localidad, provincia o domicilio. */
@@ -176,21 +213,88 @@ export function buildClientSearchFilter(term: string): Record<string, unknown> |
   return buildTokenSearchFilter(term, CLIENT_SEARCH_FIELDS);
 }
 
+interface BrandMatchCollections {
+  ids: unknown[];
+  names: string[];
+}
+
 /**
- * Filtro de productos. Las marcas que coinciden por prefijo se resuelven aparte
- * y se agregan como `brandId: { $in: [...] }`, igual que antes, pero sin un
- * regex no anclado sobre `Brand.name`.
+ * Normaliza las marcas resueltas por `buildBrandSearchFilter`.
+ *
+ * Acepta documentos `{ _id, name }` (preferido: permite saber qué token cubre
+ * la marca) y también ids sueltos para no romper llamadores históricos.
+ */
+function collectBrandMatches(matches: readonly unknown[]): BrandMatchCollections {
+  const ids: unknown[] = [];
+  const names: string[] = [];
+
+  for (const match of matches) {
+    if (match && typeof match === 'object' && '_id' in match) {
+      const brand = match as { _id?: unknown; name?: unknown };
+      if (brand._id !== undefined && brand._id !== null) ids.push(brand._id);
+      if (brand.name !== undefined && brand.name !== null) names.push(String(brand.name));
+      continue;
+    }
+
+    if (match !== undefined && match !== null) ids.push(match);
+  }
+
+  return { ids, names };
+}
+
+/**
+ * Filtro de productos.
+ *
+ * La rama principal exige todos los tokens en `Product.searchTokens`, que
+ * incluye code, name y brandName. Para bases aún no migradas se agrega una
+ * rama asistida por marca: los tokens que cubre el nombre de la marca se
+ * descartan y el resto se exige sobre los campos del producto. Sin nombres de
+ * marca (sólo ids) se conserva el comportamiento anterior.
  */
 export function buildProductSearchFilter(
   term: string,
-  matchingBrandIds: readonly unknown[] = [],
+  matchingBrands: readonly unknown[] = [],
 ): Record<string, unknown> | null {
+  const tokens = splitSearchTokens(term);
+  if (!tokens) return null;
+
   const filter = buildTokenSearchFilter(term, PRODUCT_SEARCH_FIELDS);
   if (!filter) return null;
 
-  if (matchingBrandIds.length > 0) {
-    (filter.$or as Record<string, unknown>[]).unshift({ brandId: { $in: matchingBrandIds } });
+  const { ids, names } = collectBrandMatches(matchingBrands);
+  if (ids.length === 0) return filter;
+
+  let brandCondition: Record<string, unknown>;
+  if (names.length === 0) {
+    // Compatibilidad: el llamador sólo pasó ids y no se puede saber qué token
+    // corresponde a la marca.
+    brandCondition = { brandId: { $in: ids } };
+  } else {
+    const brandWords = new Set(names.flatMap((name) => tokenizeSearchText(name)));
+    const remaining = tokens.filter(
+      ({ normalized }) => ![...brandWords].some((word) => word.startsWith(normalized)),
+    );
+    const brandConditions: Record<string, unknown>[] = [{ brandId: { $in: ids } }];
+
+    if (remaining.length > 0) {
+      brandConditions.push({
+        $or: [
+          {
+            searchTokens: {
+              $all: remaining.map(({ normalized }) => buildTokenRegex(normalized)),
+            },
+          },
+          {
+            searchTokens: { $exists: false },
+            $and: buildHistoricalTokenConditions(remaining, PRODUCT_SEARCH_FIELDS),
+          },
+        ],
+      });
+    }
+
+    brandCondition = brandConditions.length === 1 ? brandConditions[0] : { $and: brandConditions };
   }
 
+  (filter.$or as Record<string, unknown>[]).unshift(brandCondition);
   return filter;
 }

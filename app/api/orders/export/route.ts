@@ -1,10 +1,18 @@
 import { PassThrough, Readable } from 'node:stream';
 import ExcelJS from 'exceljs';
 import dbConnect from '@/lib/mongodb';
-import { requireSession } from '@/lib/auth';
+import { requireCurrentSession } from '@/lib/auth';
 import { Order } from '@/models/Order';
-import { errorResponse, handleRouteError } from '@/lib/api-errors';
+import { errorResponse, handleRouteError, parseQueryParams } from '@/lib/api-errors';
+import { PRIVATE_REVALIDATE_CACHE_CONTROL } from '@/lib/cache-control';
+import { orderListQuerySchema } from '@/lib/validations';
 import { buildOrderListQuery } from '@/lib/order-query';
+import {
+  API_RATE_LIMIT_RULES,
+  apiRateLimitKey,
+  consume,
+  rateLimitResponse,
+} from '@/lib/api-rate-limit';
 import {
   ORDER_EXPORT_COLUMNS,
   ORDER_EXPORT_CSV_MIME,
@@ -14,6 +22,7 @@ import {
   buildOrderExportFilename,
   buildOrderExportRow,
   isOrderExportFormat,
+  sanitizeSpreadsheetCell,
   serializeOrderExportCsvRow,
   type OrderExportFormat,
   type OrderExportOrderLike,
@@ -75,7 +84,12 @@ function createXlsxStream(cursor: OrderCursor): ReadableStream<Uint8Array> {
     headerRow.commit();
 
     for await (const order of limitedOrders(cursor)) {
-      const row = worksheet.addRow(buildOrderExportRow(order));
+      // Defensa en profundidad: buildOrderExportRow ya sanea, pero no se
+      // confía en que ExcelJS escape fórmulas por su cuenta.
+      const values = buildOrderExportRow(order).map((value) =>
+        typeof value === 'string' ? sanitizeSpreadsheetCell(value) : value,
+      );
+      const row = worksheet.addRow(values);
       // El detalle de líneas es multilínea: Excel debe mostrar el salto.
       row.getCell(ORDER_EXPORT_COLUMNS.length).alignment = {
         wrapText: true,
@@ -98,7 +112,7 @@ function exportHeaders(format: OrderExportFormat, filename: string): HeadersInit
   return {
     'Content-Type': format === 'csv' ? ORDER_EXPORT_CSV_MIME : ORDER_EXPORT_XLSX_MIME,
     'Content-Disposition': `attachment; filename="${filename}"`,
-    'Cache-Control': 'no-store',
+    'Cache-Control': PRIVATE_REVALIDATE_CACHE_CONTROL,
   };
 }
 
@@ -112,7 +126,7 @@ function exportHeaders(format: OrderExportFormat, filename: string): HeadersInit
  */
 export const GET = withRouteLogging(async (request: Request) => {
   try {
-    const auth = requireSession(request);
+    const auth = await requireCurrentSession(request);
     if ('response' in auth) return auth.response;
 
     const { searchParams } = new URL(request.url);
@@ -121,13 +135,25 @@ export const GET = withRouteLogging(async (request: Request) => {
       return errorResponse('El formato debe ser csv o xlsx', 400);
     }
 
+    // Mismo schema que GET /api/orders: la exportación no acepta filtros que
+    // el listado rechazaría (status, archived, fechas o búsqueda inválidos).
+    const parsedQuery = parseQueryParams(request, orderListQuerySchema);
+    if (!parsedQuery.success) return parsedQuery.response;
+
+    const limitResult = consume(
+      apiRateLimitKey('orders-export', auth.session.userId),
+      API_RATE_LIMIT_RULES.ordersExport,
+    );
+    if (!limitResult.allowed) return rateLimitResponse(limitResult);
+
+    const filters = parsedQuery.data;
     const filterResult = buildOrderListQuery(auth.session, {
-      status: searchParams.get('status'),
-      archived: searchParams.get('archived'),
-      search: searchParams.get('search'),
-      startDate: searchParams.get('startDate'),
-      endDate: searchParams.get('endDate'),
-      clientId: searchParams.get('clientId'),
+      status: filters.status ?? null,
+      archived: filters.archived ?? null,
+      search: filters.search ?? null,
+      startDate: filters.startDate ?? null,
+      endDate: filters.endDate ?? null,
+      clientId: filters.clientId ?? null,
     });
     if (!filterResult.ok) {
       return errorResponse(filterResult.error, 400);

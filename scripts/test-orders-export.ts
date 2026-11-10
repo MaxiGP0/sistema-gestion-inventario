@@ -12,17 +12,21 @@
  * Ejecutar con: npm test
  */
 import assert from 'node:assert/strict';
-import { after, before, mock, test } from 'node:test';
+import { after, before, beforeEach, mock, test } from 'node:test';
 import ExcelJS from 'exceljs';
 import mongoose from 'mongoose';
 
 import { Order } from '../models/Order';
+import { API_RATE_LIMIT_RULES, resetApiRateLimits } from '../lib/api-rate-limit';
 import {
   ORDER_EXPORT_MAX_ROWS,
   buildOrderExportFilename,
+  buildOrderExportRow,
   buildOrderExportUrl,
   escapeCsvValue,
   parseContentDispositionFilename,
+  sanitizeSpreadsheetCell,
+  serializeOrderExportCsvRow,
 } from '../lib/order-export';
 import { authRequest } from './test-auth-utils';
 
@@ -167,6 +171,8 @@ before(async () => {
   GET = (await import('../app/api/orders/export/route')).GET;
 });
 
+beforeEach(() => resetApiRateLimits());
+
 after(() => mock.restoreAll());
 
 test('sin sesión responde 401 y no consulta pedidos', async () => {
@@ -250,6 +256,46 @@ test('clientId inválido responde 400 sin consultar la base', async () => {
   assert.equal(capture, undefined);
 });
 
+test('status o fechas inválidas responden 400 con los mismos filtros que el listado', async () => {
+  resetCursor([baseOrder]);
+
+  const invalidStatus = await GET(
+    authRequest('http://localhost/api/orders/export?format=csv&status=borrador,aprobado'),
+  );
+  assert.equal(invalidStatus.status, 400);
+  assert.match((await invalidStatus.json()).error, /estado/i);
+
+  const invalidDate = await GET(
+    authRequest('http://localhost/api/orders/export?format=csv&startDate=no-es-fecha'),
+  );
+  assert.equal(invalidDate.status, 400);
+  assert.match((await invalidDate.json()).error, /Rango de fechas inválido/i);
+
+  assert.equal(capture, undefined, 'los errores de validación no deben consultar Mongo');
+});
+
+test('la exportación N+1 responde 429 con Retry-After', async () => {
+  resetCursor([]);
+  const { limit } = API_RATE_LIMIT_RULES.ordersExport;
+  const url = 'http://localhost/api/orders/export?format=csv';
+
+  for (let attempt = 0; attempt < limit; attempt += 1) {
+    const response = await GET(authRequest(url));
+    assert.equal(response.status, 200, `la solicitud ${attempt + 1} debe pasar`);
+    await response.text();
+  }
+
+  const response = await GET(authRequest(url));
+  assert.equal(response.status, 429);
+
+  const retryAfter = Number(response.headers.get('retry-after'));
+  assert.ok(
+    retryAfter > 0 && retryAfter <= Math.ceil(API_RATE_LIMIT_RULES.ordersExport.windowMs / 1000),
+    `Retry-After fuera de rango: ${retryAfter}`,
+  );
+  assert.match((await response.json()).error, /Demasiadas solicitudes/i);
+});
+
 test('un formato desconocido responde 400', async () => {
   resetCursor([baseOrder]);
 
@@ -288,6 +334,89 @@ test('CSV escapa punto y coma, comillas y saltos de línea', () => {
   assert.equal(escapeCsvValue('Linea 1\nLinea 2'), '"Linea 1\nLinea 2"');
 });
 
+test('sanitizeSpreadsheetCell neutraliza fórmulas y respeta negativos numéricos', () => {
+  assert.equal(sanitizeSpreadsheetCell('=SUM(1,1)'), "'=SUM(1,1)");
+  assert.equal(sanitizeSpreadsheetCell('+CMD'), "'+CMD");
+  assert.equal(sanitizeSpreadsheetCell('@foo'), "'@foo");
+  assert.equal(sanitizeSpreadsheetCell('\tCMD'), "'\tCMD");
+  assert.equal(sanitizeSpreadsheetCell('\rCMD'), "'\rCMD");
+  assert.equal(sanitizeSpreadsheetCell('-10.00'), '-10.00');
+  assert.equal(sanitizeSpreadsheetCell('Cliente Demo'), 'Cliente Demo');
+  assert.equal(sanitizeSpreadsheetCell(''), '');
+});
+
+test('buildOrderExportRow sanea los campos de texto sin tocar los importes', () => {
+  const row = buildOrderExportRow({
+    ...baseOrder,
+    _id: oid(),
+    clientName: '=SUM(1,1)',
+    clientCode: '+COD',
+    createdBy: '@foo',
+    status: '-estado',
+    subtotal: -10,
+    totalDiscount: -1,
+    finalTotal: -11,
+    items: [
+      {
+        ...baseOrder.items[0],
+        productCode: '+CMD',
+        productName: '=CMD(1,1)',
+        brandName: '@marca',
+      },
+    ],
+  });
+
+  assert.equal(row[2], "'=SUM(1,1)");
+  assert.equal(row[3], "'+COD");
+  assert.equal(row[4], "'@foo");
+  assert.equal(row[5], "'-estado");
+  assert.equal(row[6], -10);
+  assert.equal(row[7], -1);
+  assert.equal(row[8], -11);
+
+  const detail = String(row[11]);
+  assert.match(detail, /\['\+CMD\]/);
+  assert.match(detail, /'=CMD\(1,1\)/);
+  assert.match(detail, /'@marca/);
+});
+
+test('serializeOrderExportCsvRow sanea textos y conserva negativos numéricos', () => {
+  assert.equal(
+    serializeOrderExportCsvRow(['=SUM(1,1)', '+CMD', '@foo', -10, 'Cliente Demo']),
+    "'=SUM(1,1);'+CMD;'@foo;-10.00;Cliente Demo",
+  );
+  assert.equal(serializeOrderExportCsvRow(['-10.00', -10]), '-10.00;-10.00');
+});
+
+test('CSV neutraliza fórmulas en cliente, producto y vendedor', async () => {
+  resetCursor([
+    {
+      ...baseOrder,
+      _id: oid(),
+      clientName: '=SUM(1,1)',
+      clientCode: '+COD',
+      createdBy: '@foo',
+      items: [
+        {
+          ...baseOrder.items[0],
+          productCode: '+CMD',
+          productName: '=CMD(1,1)',
+          brandName: '@marca',
+        },
+      ],
+    },
+  ]);
+
+  const response = await GET(authRequest('http://localhost/api/orders/export?format=csv'));
+  const text = Buffer.from(await response.arrayBuffer()).toString('utf8');
+
+  assert.match(text, /;'=SUM\(1,1\);'\+COD;'@foo;/);
+  assert.match(text, /\['\+CMD\]/);
+  assert.match(text, /'=CMD\(1,1\)/);
+  assert.match(text, /'@marca/);
+  assert.doesNotMatch(text, /;=SUM\(1,1\);/);
+});
+
 test('XLSX se genera en streaming y se puede leer con exceljs', async () => {
   resetCursor([baseOrder]);
 
@@ -320,6 +449,36 @@ test('XLSX se genera en streaming y se puede leer con exceljs', async () => {
   assert.equal(row.getCell(8).value, 20);
   assert.equal(row.getCell(9).value, 180);
   assert.match(String(row.getCell(12).value), /Pedida: 2 \| Verificada: 1/);
+});
+
+test('XLSX sanea las celdas de texto y conserva los importes numéricos', async () => {
+  resetCursor([
+    {
+      ...baseOrder,
+      _id: oid(),
+      clientName: '=SUM(1,1)',
+      createdBy: '@foo',
+      subtotal: -10,
+      totalDiscount: -1,
+      finalTotal: -11,
+      items: [{ ...baseOrder.items[0], productName: '+CMD' }],
+    },
+  ]);
+
+  const response = await GET(authRequest('http://localhost/api/orders/export?format=xlsx'));
+  assert.equal(response.status, 200);
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(buffer as any);
+  const row = workbook.getWorksheet('Pedidos')!.getRow(2);
+
+  assert.equal(row.getCell(3).value, "'=SUM(1,1)");
+  assert.equal(row.getCell(5).value, "'@foo");
+  assert.equal(row.getCell(7).value, -10);
+  assert.equal(row.getCell(8).value, -1);
+  assert.equal(row.getCell(9).value, -11);
+  assert.match(String(row.getCell(12).value), /'\+CMD/);
 });
 
 test('pide al cursor como máximo 10.000 filas y no usa toArray', async () => {

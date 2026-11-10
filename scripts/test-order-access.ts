@@ -12,17 +12,54 @@
  * Ejecutar con: npm test
  */
 import assert from 'node:assert/strict';
-import { after, before, mock, test } from 'node:test';
+import { after, before, beforeEach, mock, test } from 'node:test';
 import mongoose from 'mongoose';
 
 import { Order } from '../models/Order';
+import { User } from '../models/User';
 import { buildOrderReadFilter, canListAllOrders, canReadOrder } from '../lib/order-access';
 import type { UserRole } from '../lib/authz';
+import { invalidateCurrentSessionCache } from '../lib/current-session-cache';
 import { authRequest } from './test-auth-utils';
 
 const OWNER_ID = '0000000000000000000000a1';
 const OTHER_ID = '0000000000000000000000b2';
 const SESSION_USERNAME = 'test-vendedor';
+
+interface CurrentUserRecord {
+  _id: string;
+  username: string;
+  role: UserRole;
+  active: boolean;
+  sessionVersion: number;
+  notificationsEnabled: boolean;
+}
+
+const currentUsers = new Map<string, CurrentUserRecord>();
+
+/** Estado actual que devolverá el `User.findById` falso de requireCurrentSession. */
+function setCurrentUser(
+  userId: string,
+  role: UserRole,
+  {
+    active = true,
+    sessionVersion = 0,
+    username = `test-${role}`,
+  }: { active?: boolean; sessionVersion?: number; username?: string } = {},
+): CurrentUserRecord {
+  const record: CurrentUserRecord = {
+    _id: userId,
+    username,
+    role,
+    active,
+    sessionVersion,
+    notificationsEnabled: true,
+  };
+
+  currentUsers.set(userId, record);
+  invalidateCurrentSessionCache(userId);
+  return record;
+}
 
 let listQuery: any = null;
 let detailOrder: any = null;
@@ -59,15 +96,23 @@ const listOrders = async (
   role: UserRole,
   queryString = '?status=borrador&archived=false',
   userId = OWNER_ID,
+  dbRole: UserRole = role,
 ) => {
+  setCurrentUser(userId, dbRole, { username: `test-${dbRole}` });
   listQuery = null;
   const response = await GET_LIST(
     authRequest(`http://localhost/api/orders${queryString}`, {}, role, userId),
   );
-  return { status: response.status, json: await response.json(), query: listQuery };
+  return {
+    status: response.status,
+    json: await response.json(),
+    query: listQuery,
+    headers: response.headers,
+  };
 };
 
 const getOrder = async (role: UserRole, order: any, userId = OWNER_ID) => {
+  setCurrentUser(userId, role, { username: `test-${role}` });
   detailOrder = order;
   const response = await GET_DETAIL(
     authRequest(`http://localhost/api/orders/${order._id}`, {}, role, userId),
@@ -85,8 +130,23 @@ before(async () => {
   mock.method(Order as any, 'find', (query: any) => fakeListQuery(query));
   mock.method(Order as any, 'findById', () => fakeDetailQuery());
 
+  // GET /api/orders y GET /api/orders/[id] ahora usan requireCurrentSession.
+  mock.method(User as any, 'findById', (id: unknown) => {
+    const record = currentUsers.get(String(id));
+    const chain: any = {
+      select: () => chain,
+      lean: async () => (record ? { ...record } : null),
+    };
+    return chain;
+  });
+
   GET_LIST = (await import('../app/api/orders/route')).GET;
   ({ GET: GET_DETAIL } = await import('../app/api/orders/[id]/route'));
+});
+
+beforeEach(() => {
+  currentUsers.clear();
+  invalidateCurrentSessionCache();
 });
 
 after(() => mock.restoreAll());
@@ -183,6 +243,55 @@ test('GET /api/orders no filtra por creador a admin, controlador ni billing', as
     assert.equal(query.$or, undefined, `${role} no debe recibir el $or del vendedor`);
     assert.equal(query.createdById, undefined, `${role} no debe filtrar por createdById`);
   }
+});
+
+test('GET /api/orders responde 401 a un usuario desactivado y borra la cookie', async () => {
+  setCurrentUser(OWNER_ID, 'vendedor', { active: false });
+
+  const response = await GET_LIST(
+    authRequest(
+      'http://localhost/api/orders?status=borrador&archived=false',
+      {},
+      'vendedor',
+      OWNER_ID,
+    ),
+  );
+
+  assert.equal(response.status, 401);
+  assert.match(response.headers.get('set-cookie') || '', /Max-Age=0/i);
+});
+
+test('un vendedor con cookie emitida como admin no puede listar pedidos ajenos', async () => {
+  // La cookie dice `admin`, pero el usuario actual es vendedor: manda la base.
+  const { status, query } = await listOrders(
+    'admin',
+    '?status=borrador&archived=false',
+    OWNER_ID,
+    'vendedor',
+  );
+
+  assert.equal(status, 200);
+  assert.deepEqual(query.$or, [
+    { createdById: OWNER_ID },
+    { createdById: null, createdBy: SESSION_USERNAME },
+  ]);
+});
+
+test('una cookie con sessionVersion vieja no puede listar pedidos', async () => {
+  setCurrentUser(OWNER_ID, 'vendedor', { sessionVersion: 1 });
+
+  const response = await GET_LIST(
+    authRequest(
+      'http://localhost/api/orders?status=borrador&archived=false',
+      {},
+      'vendedor',
+      OWNER_ID,
+      0,
+    ),
+  );
+
+  assert.equal(response.status, 401, 'una baja/cambio de rol invalida la cookie anterior');
+  assert.match(response.headers.get('set-cookie') || '', /Max-Age=0/i);
 });
 
 // ---------------------------------------------------------------------------

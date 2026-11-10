@@ -18,6 +18,7 @@ import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 
 import { sessionCookieName, verifySessionToken } from '../lib/session';
+import { authorizeCurrentPageSession } from '../lib/auth-page';
 import type { UserRole } from '../lib/authz';
 
 const ADMIN_ID = '000000000000000000000001';
@@ -308,7 +309,7 @@ test('POST crea con bcrypt 10 y GET lista sin passwordHash', async () => {
   }
 });
 
-test('PATCH cambia el rol al instante y el reset de contraseña invalida la sesión', async () => {
+test('PATCH cambia el rol e incrementa sessionVersion como una baja/reset', async () => {
   const target = seedUser({ id: TARGET_ID, username: 'objetivo', role: 'vendedor' });
   const oldCookie = testSessionCookie('vendedor', TARGET_ID, 0);
 
@@ -317,19 +318,26 @@ test('PATCH cambia el rol al instante y el reset de contraseña invalida la sesi
   );
   assert.equal(beforeRole.status, 403, 'con rol vendedor no puede listar usuarios');
 
-  // El cambio de rol no incrementa sessionVersion: la cookie sigue siendo
-  // válida, pero el rol efectivo pasa a ser el de la base.
   const promote = await PATCH(
     authRequest('http://localhost/api/users', jsonInit('PATCH', { id: TARGET_ID, role: 'admin' })),
   );
   assert.equal(promote.status, 200);
   assert.equal(target.role, 'admin');
-  assert.equal(target.sessionVersion, 0);
+  assert.equal(target.sessionVersion, 1, 'el cambio de rol debe incrementar sessionVersion');
 
-  const afterPromote = await GET(
+  // La cookie anterior ya no representa al usuario: version 0 contra version 1.
+  const staleAfterPromote = await GET(
     new Request('http://localhost/api/users', { headers: { cookie: oldCookie } }),
   );
-  assert.equal(afterPromote.status, 200, 'el rol admin debe aplicar sin esperar 8 h');
+  assert.equal(staleAfterPromote.status, 401, 'el cambio de rol invalida la cookie anterior');
+  assert.match(staleAfterPromote.headers.get('set-cookie') || '', /Max-Age=0/i);
+
+  // Un login nuevo sí trae el rol y la versión actuales.
+  const promotedCookie = testSessionCookie('admin', TARGET_ID, 1);
+  const afterPromote = await GET(
+    new Request('http://localhost/api/users', { headers: { cookie: promotedCookie } }),
+  );
+  assert.equal(afterPromote.status, 200, 'el rol admin debe aplicar al reingresar');
 
   const demote = await PATCH(
     authRequest(
@@ -338,11 +346,25 @@ test('PATCH cambia el rol al instante y el reset de contraseña invalida la sesi
     ),
   );
   assert.equal(demote.status, 200);
+  assert.equal(target.sessionVersion, 2);
 
   const afterDemote = await GET(
-    new Request('http://localhost/api/users', { headers: { cookie: oldCookie } }),
+    new Request('http://localhost/api/users', { headers: { cookie: promotedCookie } }),
   );
-  assert.equal(afterDemote.status, 403, 'la desjerarquización también debe aplicar al instante');
+  assert.equal(afterDemote.status, 401, 'la desjerarquización invalida la cookie de admin');
+
+  // Aun con una cookie firmada que declare `admin`, la autorización usa el rol
+  // de la base: si ya es vendedor, la API responde 403 y /backoffice redirige.
+  const forgedAdminCookie = testSessionCookie('admin', TARGET_ID, 2);
+  const currentRoleResponse = await GET(
+    new Request('http://localhost/api/users', { headers: { cookie: forgedAdminCookie } }),
+  );
+  assert.equal(currentRoleResponse.status, 403);
+
+  const signed = verifySessionToken(forgedAdminCookie.slice(forgedAdminCookie.indexOf('=') + 1));
+  assert.ok(signed);
+  const pageDecision = await authorizeCurrentPageSession(signed, ['admin']);
+  assert.equal(pageDecision.status, 'forbidden', '/backoffice debe redirigir al panel');
 
   const reset = await PATCH(
     authRequest(
@@ -351,14 +373,32 @@ test('PATCH cambia el rol al instante y el reset de contraseña invalida la sesi
     ),
   );
   assert.equal(reset.status, 200);
-  assert.equal(target.sessionVersion, 1);
+  assert.equal(target.sessionVersion, 3);
   assert.ok(await bcrypt.compare('nueva-clave-456', target.passwordHash));
 
   const stale = await GET(
-    new Request('http://localhost/api/users', { headers: { cookie: oldCookie } }),
+    new Request('http://localhost/api/users', { headers: { cookie: forgedAdminCookie } }),
   );
   assert.equal(stale.status, 401, 'el reset debe invalidar las sesiones viejas');
-  assert.match(stale.headers.get('set-cookie') || '', /Max-Age=0/i);
+});
+
+test('un usuario desactivado no puede leer la página ni listar usuarios', async () => {
+  const target = seedUser({ id: TARGET_ID, username: 'admin-objetivo', role: 'admin' });
+  const cookie = testSessionCookie('admin', TARGET_ID, 0);
+  const signed = verifySessionToken(cookie.slice(cookie.indexOf('=') + 1));
+  assert.ok(signed);
+
+  const deactivate = await PATCH(
+    authRequest('http://localhost/api/users', jsonInit('PATCH', { id: TARGET_ID, active: false })),
+  );
+  assert.equal(deactivate.status, 200);
+  assert.equal(target.sessionVersion, 1);
+
+  const decision = await authorizeCurrentPageSession(signed, ['admin']);
+  assert.equal(decision.status, 'login', 'una baja debe mandar al login');
+
+  const response = await GET(new Request('http://localhost/api/users', { headers: { cookie } }));
+  assert.equal(response.status, 401);
 });
 
 test('un usuario desactivado no puede mutar y recibe 401 con cookie borrada', async () => {

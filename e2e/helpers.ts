@@ -1,6 +1,13 @@
 import { expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import { E2E_USERS, type E2EClient, type E2EUser } from './fixtures';
 
+/** Usuario mínimo para operar el login, venga del seed o de un alta del test. */
+export interface LoginUser {
+  username: string;
+  password: string;
+  role: E2EUser['role'];
+}
+
 /** Títulos visibles del panel por rol (el encabezado cambia con la sesión). */
 const PANEL_HEADINGS: Record<E2EUser['role'], string> = {
   admin: 'Panel administrador',
@@ -9,12 +16,12 @@ const PANEL_HEADINGS: Record<E2EUser['role'], string> = {
   billing: 'Panel de facturación',
 };
 
-export function panelHeadingFor(user: E2EUser): string {
+export function panelHeadingFor(user: Pick<LoginUser, 'role'>): string {
   return PANEL_HEADINGS[user.role];
 }
 
-/** Inicia sesión por la UI con un usuario del seed E2E. */
-export async function loginAs(page: Page, user: E2EUser): Promise<void> {
+/** Inicia sesión por la UI con un usuario del seed E2E o uno creado por el test. */
+export async function loginAs(page: Page, user: LoginUser): Promise<void> {
   await page.context().clearCookies();
   await page.goto('/login');
 
@@ -47,6 +54,23 @@ export async function clientIdByCode(page: Page, code: string): Promise<string> 
   if (!client) throw new Error(`No se encontró el cliente E2E ${code}`);
 
   return client._id;
+}
+
+/** Id del producto del seed, consultado con la sesión del navegador. */
+export async function productIdByCode(page: Page, code: string): Promise<string> {
+  const response = await page.request.get(
+    `/api/products?search=${encodeURIComponent(code)}&limit=20`,
+  );
+  expect(response.status()).toBe(200);
+
+  const payload = (await response.json()) as {
+    products: Array<{ _id: string; code: string }>;
+  };
+  const product = payload.products.find((item) => item.code === code);
+
+  if (!product) throw new Error(`No se encontró el producto E2E ${code}`);
+
+  return product._id;
 }
 
 export interface OrderListItem {
@@ -154,6 +178,19 @@ export async function waitForReactHydration(page: Page, selector: string): Promi
       return Object.keys(element).some((key) => key.startsWith('__reactProps$'));
     },
     selector,
+    { timeout: 30_000 },
+  );
+}
+
+/**
+ * Espera a que el chunk del indicador global de sincronización esté cargado.
+ * Sin esta señal, un `context.setOffline(true)` temprano hace fallar el import
+ * dinámico y la cola offline no puede abrirse desde la UI.
+ */
+export async function waitForOfflineSyncReady(page: Page): Promise<void> {
+  await page.waitForFunction(
+    () => document.documentElement.dataset.offlineSyncReady === 'true',
+    undefined,
     { timeout: 30_000 },
   );
 }

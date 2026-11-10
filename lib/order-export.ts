@@ -81,6 +81,26 @@ export interface OrderExportOrderLike {
 /** Valor de una celda antes de serializarla a CSV. */
 export type OrderExportCell = string | number | Date;
 
+/** Primeros caracteres que Excel/Sheets interpretan como inicio de fórmula. */
+const SPREADSHEET_FORMULA_TRIGGER = /^[=+\-@\t\r]/;
+
+/** Número negativo real (p. ej. "-10.00"): es dato, no una fórmula. */
+const NEGATIVE_NUMBER_TEXT = /^-\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+
+/**
+ * Neutraliza la inyección de fórmulas en celdas de texto de CSV/XLSX.
+ *
+ * Si el texto empieza con `=`, `+`, `-`, `@`, tab o CR se antepone un
+ * apóstrofo para que la planilla lo trate como texto. Los negativos numéricos
+ * reales (por ejemplo "-10.00") se conservan sin cambios: no son fórmulas.
+ * Las celdas numéricas nunca pasan por acá (se mantienen como `number`).
+ */
+export function sanitizeSpreadsheetCell(value: string): string {
+  if (!SPREADSHEET_FORMULA_TRIGGER.test(value)) return value;
+  if (value.startsWith('-') && NEGATIVE_NUMBER_TEXT.test(value)) return value;
+  return `'${value}`;
+}
+
 function numberOrZero(value: unknown): number {
   const number = Number(value);
   return Number.isFinite(number) ? number : 0;
@@ -95,9 +115,14 @@ function itemLabel(item: OrderExportItemLike): string {
   const name = item.productName?.trim();
   const brand = item.brandName?.trim();
 
-  const identity = [code ? `[${code}]` : '', name ?? ''].filter(Boolean).join(' ');
-  if (identity && brand) return `${identity} (${brand})`;
-  return identity || brand || 'Línea';
+  const identity = [
+    code ? `[${sanitizeSpreadsheetCell(code)}]` : '',
+    name ? sanitizeSpreadsheetCell(name) : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+  if (identity && brand) return `${identity} (${sanitizeSpreadsheetCell(brand)})`;
+  return identity || (brand ? sanitizeSpreadsheetCell(brand) : '') || 'Línea';
 }
 
 /**
@@ -138,18 +163,20 @@ export function buildOrderExportRow(order: OrderExportOrderLike): OrderExportCel
   const clientCode = order.clientCode?.trim() || order.clientId?.code?.trim() || '';
 
   return [
-    String(order._id),
+    sanitizeSpreadsheetCell(String(order._id)),
     exportDate(order.createdAt),
-    clientName,
-    clientCode,
-    order.createdBy ?? '',
-    order.status ?? '',
+    sanitizeSpreadsheetCell(clientName),
+    sanitizeSpreadsheetCell(clientCode),
+    sanitizeSpreadsheetCell(order.createdBy ?? ''),
+    sanitizeSpreadsheetCell(order.status ?? ''),
     numberOrZero(order.subtotal),
     numberOrZero(order.totalDiscount),
     numberOrZero(order.finalTotal),
-    formatPaymentCondition(order.paymentCondition, order.paymentConditionDetail),
-    formatInvoiceType(order.invoiceType),
-    formatOrderItemDetails(order.items),
+    sanitizeSpreadsheetCell(
+      formatPaymentCondition(order.paymentCondition, order.paymentConditionDetail),
+    ),
+    sanitizeSpreadsheetCell(formatInvoiceType(order.invoiceType)),
+    sanitizeSpreadsheetCell(formatOrderItemDetails(order.items)),
   ];
 }
 
@@ -172,9 +199,18 @@ export function escapeCsvValue(value: OrderExportCell | null | undefined): strin
   return text;
 }
 
-/** Serializa una fila CSV (sin salto de línea final). */
+/**
+ * Serializa una fila CSV (sin salto de línea final).
+ *
+ * Las celdas de texto se sanean antes de escaparlas; los números y fechas
+ * conservan su formato (un `-10.00` numérico no se convierte en texto).
+ */
 export function serializeOrderExportCsvRow(values: readonly OrderExportCell[]): string {
-  return values.map(escapeCsvValue).join(ORDER_EXPORT_CSV_DELIMITER);
+  return values
+    .map((value) =>
+      escapeCsvValue(typeof value === 'string' ? sanitizeSpreadsheetCell(value) : value),
+    )
+    .join(ORDER_EXPORT_CSV_DELIMITER);
 }
 
 /** Cabecera CSV con BOM UTF-8 para que Excel reconozca los acentos. */

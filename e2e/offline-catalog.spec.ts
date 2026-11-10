@@ -1,6 +1,12 @@
-import { expect, test, type Page } from '@playwright/test';
-import { E2E_CLIENTS, E2E_PRODUCTS, E2E_USERS } from './fixtures';
-import { loginAs, openDepositOrder } from './helpers';
+import { devices, expect, test, type Page } from '@playwright/test';
+import { E2E_CLIENTS, E2E_OFFLINE_CATALOG, E2E_PRODUCTS, E2E_USERS } from './fixtures';
+import {
+  clientIdByCode,
+  deleteOrderAsAdmin,
+  loginAs,
+  openDepositOrder,
+  productIdByCode,
+} from './helpers';
 
 /**
  * Alta de pedidos en frío con el catálogo guardado en IndexedDB.
@@ -84,6 +90,36 @@ async function countCachedCatalogRecords(
   );
 }
 
+/** Cantidad de últimos pedidos guardados para repetir sin red. */
+async function countCachedLastOrders(page: Page): Promise<number> {
+  return page.evaluate(
+    ({ dbName, store }) =>
+      new Promise<number>((resolve, reject) => {
+        const request = indexedDB.open(dbName);
+        request.onsuccess = () => {
+          const db = request.result;
+          if (!db.objectStoreNames.contains(store)) {
+            db.close();
+            resolve(0);
+            return;
+          }
+          const tx = db.transaction(store, 'readonly');
+          const count = tx.objectStore(store).count();
+          count.onsuccess = () => {
+            db.close();
+            resolve(count.result);
+          };
+          count.onerror = () => {
+            db.close();
+            reject(count.error);
+          };
+        };
+        request.onerror = () => reject(request.error);
+      }),
+    { dbName: CACHE_DB, store: 'clientLastOrders' },
+  );
+}
+
 async function sessionUserId(page: Page): Promise<string> {
   return page.evaluate(async () => {
     const response = await fetch('/api/auth/session');
@@ -119,10 +155,17 @@ async function seedCatalog(
   await page.evaluate(
     async ({ dbName, userId, client, product, brand, savedAt }) => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
-        const request = indexedDB.open(dbName, 1);
+        const request = indexedDB.open(dbName);
         request.onupgradeneeded = () => {
           const database = request.result;
-          for (const storeName of ['clients', 'brands', 'products', 'recentClients', 'meta']) {
+          for (const storeName of [
+            'clients',
+            'brands',
+            'products',
+            'recentClients',
+            'clientLastOrders',
+            'meta',
+          ]) {
             if (database.objectStoreNames.contains(storeName)) continue;
             const store = database.createObjectStore(storeName, { keyPath: 'key' });
             store.createIndex('userId', 'userId', { unique: false });
@@ -400,6 +443,44 @@ test.describe('Catálogo offline del alta', () => {
     await expect.poll(() => clientRequests.length, { timeout: 20_000 }).toBeGreaterThan(0);
   });
 
+  test('el full sync guarda más de 500 productos y el alta encuentra uno fuera de esa página', async ({
+    page,
+    context,
+  }) => {
+    const targetCode = E2E_OFFLINE_CATALOG.codeFor(E2E_OFFLINE_CATALOG.targetIndex);
+    const targetName = E2E_OFFLINE_CATALOG.nameFor(E2E_OFFLINE_CATALOG.targetIndex);
+
+    await loginAs(page, E2E_USERS.seller);
+
+    await page.goto('/orders/new');
+    await expect(page.getByRole('heading', { name: 'Nuevo pedido' })).toBeVisible();
+    await waitForServiceWorkerControl(page);
+    await waitForCatalogDb(page);
+    await waitForOfflinePageCache(page, '/orders/new');
+
+    // El sync automático arranca después de la primera pintura y pagina hasta
+    // superar los 500 registros del prefetch histórico.
+    await expect
+      .poll(() => countCachedCatalogRecords(page, 'products'), { timeout: 60_000 })
+      .toBeGreaterThanOrEqual(E2E_OFFLINE_CATALOG.productCount);
+
+    await context.setOffline(true);
+    await expect.poll(() => page.evaluate(() => navigator.onLine)).toBe(false);
+
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.getByRole('heading', { name: 'Nuevo pedido' })).toBeVisible();
+    await expect(page.getByTestId('offline-catalog-badge')).toBeVisible();
+
+    const productSearch = page.getByPlaceholder('Buscar producto por nombre o código...');
+    await productSearch.fill(targetCode);
+
+    const row = page.getByRole('row', { name: new RegExp(targetCode) });
+    await expect(row).toBeVisible();
+    await expect(row).toContainText(targetName);
+
+    await context.setOffline(false);
+  });
+
   test('el modal de agregar producto de depósito busca en IndexedDB sin red', async ({
     page,
     context,
@@ -434,5 +515,112 @@ test.describe('Catálogo offline del alta', () => {
     await expect(page.getByText(product.name)).toBeVisible();
 
     await context.setOffline(false);
+  });
+});
+
+test.describe('Repetir último pedido sin red @ móvil', () => {
+  test.use({
+    viewport: { width: 412, height: 915 },
+    isMobile: true,
+    hasTouch: true,
+    deviceScaleFactor: devices['Pixel 7'].deviceScaleFactor,
+    userAgent: devices['Pixel 7'].userAgent,
+  });
+
+  test('cachea el último pedido online y lo autocompleta y repite offline', async ({
+    page,
+    context,
+    request,
+  }) => {
+    const client = E2E_CLIENTS.mobileControl;
+    const product = E2E_PRODUCTS.primary;
+    let orderId: string | null = null;
+
+    await loginAs(page, E2E_USERS.seller);
+    await waitForServiceWorkerControl(page);
+
+    const clientId = await clientIdByCode(page, client.code);
+    const productId = await productIdByCode(page, product.code);
+
+    const creation = await page.request.post('/api/orders', {
+      data: {
+        clientId,
+        items: [{ productId, requestedQuantity: 2 }],
+        invoiceType: 'B',
+        paymentCondition: 'cuenta_corriente',
+        clientRequestId: `e2e-offline-repeat-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      },
+    });
+    expect(creation.status()).toBe(200);
+    orderId = ((await creation.json()) as { order: { _id: string } }).order._id;
+
+    try {
+      // Visita online: deja el HTML en el SW y el catálogo local listo.
+      await page.goto('/orders/new');
+      await expect(page.getByRole('heading', { name: 'Nuevo pedido' })).toBeVisible();
+      await waitForOfflinePageCache(page, '/orders/new');
+      await expect.poll(() => countCachedCatalogRecords(page, 'products')).toBeGreaterThan(0);
+
+      const selectClient = async () => {
+        await page
+          .getByRole('button', { name: new RegExp(`Seleccionar cliente|${client.code}`) })
+          .first()
+          .click();
+        const dialog = page.getByRole('dialog');
+        await expect(dialog.getByRole('heading', { name: 'Seleccionar Cliente' })).toBeVisible();
+        await dialog.getByPlaceholder('Buscar por código, nombre o localidad...').fill(client.code);
+        await dialog
+          .getByRole('button', { name: new RegExp(`${client.code} - ${client.name}`) })
+          .click();
+        await expect(dialog).toBeHidden();
+      };
+
+      await selectClient();
+
+      // El GET del listado ya trae items.productId y deja el resumen en IDB.
+      await expect.poll(() => countCachedLastOrders(page), { timeout: 20_000 }).toBeGreaterThan(0);
+
+      // El borrador local guarda los mismos datos comerciales. Se descarta para
+      // que la recarga offline demuestre que el autocompletado sale de IDB y no
+      // de localStorage.
+      await page.goto('/orders');
+      await page.evaluate(() => {
+        for (const key of Object.keys(localStorage)) {
+          if (key.startsWith('sgi_order_draft:')) localStorage.removeItem(key);
+        }
+      });
+
+      await context.setOffline(true);
+      await expect.poll(() => page.evaluate(() => navigator.onLine)).toBe(false);
+
+      // Navegación en frío desde el HTML cacheado: el número de pedido ya no
+      // está en memoria y todo debe salir de IndexedDB.
+      await page.goto('/orders/new', { waitUntil: 'domcontentloaded' });
+      await expect(page.getByRole('heading', { name: 'Nuevo pedido' })).toBeVisible();
+      await expect(page.getByTestId('offline-catalog-badge')).toBeVisible();
+
+      await selectClient();
+
+      const commercialSummary = page.getByTestId('mobile-commercial-summary');
+      await expect(commercialSummary).toContainText('Factura B');
+      await expect(commercialSummary).toContainText('Cuenta corriente');
+
+      // La tarjeta se pliega al completar los datos: se reabre para repetir.
+      await commercialSummary
+        .getByRole('button', { name: 'Editar condición / descuentos' })
+        .click();
+      await page.getByRole('button', { name: 'Repetir último pedido' }).click();
+      await page.getByRole('button', { name: 'Cargar en el carrito' }).click();
+
+      await expect(page.getByTestId('selected-products-filter')).toHaveText('Seleccionados (1)');
+      const productCard = page.locator('.cv-product-card').filter({ hasText: product.code });
+      await expect(productCard).toBeVisible();
+      await expect(
+        productCard.getByRole('spinbutton', { name: /^Cantidad en el catálogo de/ }),
+      ).toHaveValue('2');
+    } finally {
+      await context.setOffline(false);
+      if (orderId) await deleteOrderAsAdmin(request, orderId);
+    }
   });
 });

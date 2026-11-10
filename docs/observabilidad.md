@@ -171,7 +171,7 @@ nombre: actualiza monitores/alertas existentes y no duplica.
 npm run observability:alerts:dry
 
 # Crear/actualizar (requiere token con alerts:write)
-SENTRY_AUTH_TOKEN=... SENTRY_ORG=inventario SENTRY_PROJECT=sistema-gestion-inventario \
+SENTRY_AUTH_TOKEN=... SENTRY_ORG=sgi SENTRY_PROJECT=sistema-gestion-inventario \
   npm run observability:alerts
 ```
 
@@ -179,7 +179,7 @@ En PowerShell:
 
 ```powershell
 $env:SENTRY_AUTH_TOKEN = "..."
-$env:SENTRY_ORG = "inventario"
+$env:SENTRY_ORG = "sgi"
 $env:SENTRY_PROJECT = "sistema-gestion-inventario"
 npm run observability:alerts
 ```

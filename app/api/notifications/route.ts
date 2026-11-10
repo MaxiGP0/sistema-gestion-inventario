@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import dbConnect from '@/lib/mongodb';
-import { requireCurrentRole, requireCurrentSession, requireSession } from '@/lib/auth';
+import { requireCurrentRole, requireCurrentSession } from '@/lib/auth';
 import { resolveUserRole } from '@/lib/authz';
 import { Notification } from '@/models/Notification';
 import {
@@ -21,7 +21,7 @@ import { handleRouteError, errorResponse, parseJsonBody, parseQueryParams } from
 import { runAfterResponse } from '@/lib/after-response';
 import { decodeNotificationCursor } from '@/lib/notification-cursor';
 import { dispatchPushNotification } from '@/lib/push-notifications';
-import { broadcastEvent } from '@/lib/sse';
+import { broadcastEvent, toSseNotificationPayload } from '@/lib/sse';
 import type {
   ApiMessageResponse,
   DeleteResponse,
@@ -39,7 +39,7 @@ import { withRouteLogging } from '@/lib/logger';
  */
 export const GET = withRouteLogging(async (request: Request) => {
   try {
-    const auth = requireSession(request);
+    const auth = await requireCurrentSession(request);
     if ('response' in auth) return auth.response;
 
     const parsedQuery = parseQueryParams(request, notificationQuerySchema);
@@ -107,6 +107,17 @@ export const POST = withRouteLogging(async (request: Request) => {
     });
 
     const eventId = notification?._id ? String(notification._id) : undefined;
+    const notificationPayload = notification?._id
+      ? toSseNotificationPayload({
+          id: notification._id,
+          title: notification.title,
+          message: notification.message,
+          createdAt: notification.createdAt,
+          targetRole: notification.targetRole,
+          orderId: notification.orderId,
+        })
+      : undefined;
+
     runAfterResponse(async () => {
       try {
         broadcastEvent({
@@ -116,6 +127,7 @@ export const POST = withRouteLogging(async (request: Request) => {
           ...(targetUsername ? { targetUsername } : {}),
           ...(orderId ? { orderId: String(orderId) } : {}),
           eventId,
+          ...(notificationPayload ? { notification: notificationPayload } : {}),
         });
       } catch (error) {
         console.error(`Error al emitir el evento SSE para ${targetRole}:`, error);

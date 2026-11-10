@@ -17,8 +17,8 @@
 import type { Types } from 'mongoose';
 import { Notification } from '../models/Notification';
 import { dispatchPushNotification } from './push-notifications';
-import { broadcastEvent } from './sse';
-import type { NotificationTargetRole } from './types/notification';
+import { broadcastEvent, toSseNotificationPayload } from './sse';
+import type { NotificationEventPayload, NotificationTargetRole } from './types/notification';
 
 export type OrderNotificationTarget = NotificationTargetRole;
 
@@ -45,6 +45,7 @@ export async function publishOrderNotification({
   orderId,
 }: OrderNotificationInput): Promise<void> {
   let eventId: string | undefined;
+  let notificationPayload: NotificationEventPayload | undefined;
   let persisted = false;
 
   try {
@@ -57,6 +58,16 @@ export async function publishOrderNotification({
       orderId,
     });
     eventId = notification?._id ? String(notification._id) : undefined;
+    if (notification?._id) {
+      notificationPayload = toSseNotificationPayload({
+        id: notification._id,
+        title: notification.title,
+        message: notification.message,
+        createdAt: notification.createdAt,
+        targetRole: notification.targetRole,
+        orderId: notification.orderId,
+      });
+    }
     persisted = true;
   } catch (error) {
     console.error(`Error al crear la notificación de pedido para ${targetRole}:`, error);
@@ -70,6 +81,7 @@ export async function publishOrderNotification({
       ...(targetUsername ? { targetUsername } : {}),
       orderId: String(orderId),
       eventId,
+      ...(notificationPayload ? { notification: notificationPayload } : {}),
     });
   } catch (error) {
     console.error(`Error al emitir el evento SSE de pedido para ${targetRole}:`, error);

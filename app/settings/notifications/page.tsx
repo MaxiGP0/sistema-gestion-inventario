@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation';
 import { Bell, BellOff } from 'lucide-react';
 import Card from '@/components/ui/Card';
 import PushNotificationsCard from '@/components/PushNotificationsCard';
+import HapticsPreferenceCard from '@/components/settings/HapticsPreferenceCard';
+import OfflineCatalogCard from '@/components/settings/OfflineCatalogCard';
 import { useUser } from '@/context/UserContext';
 import { useToast } from '@/context/ToastContext';
 import { api } from '@/lib/api-client';
@@ -118,6 +120,10 @@ export default function NotificationPreferencesPage() {
       </Card>
 
       <PushNotificationsCard notificationsEnabled={enabled} />
+
+      <HapticsPreferenceCard />
+
+      <OfflineCatalogCard />
     </div>
   );
 }

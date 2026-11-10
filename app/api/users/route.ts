@@ -15,6 +15,7 @@ import {
   updateUserSchema,
 } from '@/lib/validations';
 import { errorResponse, handleRouteError, parseJsonBody } from '@/lib/api-errors';
+import { PRIVATE_REVALIDATE_HEADERS } from '@/lib/cache-control';
 import type { DeleteResponse, UserListResponse, UserMutationResponse } from '@/lib/types';
 import { withRouteLogging } from '@/lib/logger';
 
@@ -28,9 +29,10 @@ import { withRouteLogging } from '@/lib/logger';
  *
  * Reglas duras: nadie puede darse de baja/eliminarse a sí mismo y el sistema
  * nunca puede quedar sin administradores activos. Un cambio de rol no espera
- * las 8 h de la cookie: requireCurrentSession lee el rol actual en cada
- * escritura. Desactivar o resetear la contraseña invalida las sesiones del
- * usuario incrementando `sessionVersion`.
+ * las 8 h de la cookie: además de leerse el rol actual en cada escritura,
+ * `sessionVersion` se incrementa para invalidar la sesión anterior (incluida
+ * la conexión SSE de la bandeja vieja) y forzar un nuevo login con el rol
+ * correcto. Desactivar, reactivar o resetear la contraseña hace lo mismo.
  */
 
 interface LeanManagedUser {
@@ -114,7 +116,7 @@ export const GET = withRouteLogging(async (request: Request) => {
 
     const users = await listUsers();
     const response: UserListResponse = { success: true, users };
-    return NextResponse.json(response);
+    return NextResponse.json(response, { headers: PRIVATE_REVALIDATE_HEADERS });
   } catch (error: unknown) {
     return handleRouteError(error, { context: 'Error al listar usuarios:' });
   }
@@ -204,8 +206,15 @@ export const PATCH = withRouteLogging(async (request: Request) => {
     if (active !== undefined) update.active = active;
     if (password !== undefined) update.passwordHash = await hashPassword(password);
 
-    // Reset de contraseña o reactivación: las cookies viejas dejan de valer.
-    if (password !== undefined || (active !== undefined && active !== currentActive)) {
+    // Reset de contraseña, cambio de rol o cambio de estado: las cookies viejas
+    // dejan de valer. En particular, el cambio de rol cierra la sesión SSE de
+    // la bandeja anterior y obliga a reingresar con el rol correcto.
+    const roleChanged = role !== undefined && role !== currentRole;
+    if (
+      password !== undefined ||
+      roleChanged ||
+      (active !== undefined && active !== currentActive)
+    ) {
       update.sessionVersion =
         (typeof target.sessionVersion === 'number' ? target.sessionVersion : 0) + 1;
     }

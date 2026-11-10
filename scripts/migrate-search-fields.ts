@@ -11,8 +11,9 @@ import { backfillSearchFields, syncSearchIndexes } from '../lib/search-backfill'
  * 1. Rellena `searchName`/`searchCode`/`searchLocalidad`/`searchProvince`/
  *    `searchAddress` (minúsculas, sin acentos) y el array multikey
  *    `searchTokens` con las palabras únicas de esos campos en los documentos
- *    existentes. En pedidos completa además `shortId` y suma cliente, vendedor,
- *    código corto e ítems al array. Sólo escribe los campos que cambiaron, por
+ *    existentes. En productos el array incluye además el nombre de la marca
+ *    (resuelto desde `Brand`); en pedidos completa `shortId` y suma cliente,
+ *    vendedor, código corto e ítems. Sólo escribe los campos que cambiaron, por
  *    lotes.
  * 2. Ejecuta `syncIndexes()` para crear los índices de prefijo/multikey y
  *    eliminar los índices legacy que el schema ya no declara (incluido

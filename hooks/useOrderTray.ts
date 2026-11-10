@@ -4,6 +4,7 @@ import { useCallback, useDeferredValue, useEffect, useMemo, useState, useTransit
 import { useRouter } from 'next/navigation';
 import { useToast } from '@/context/ToastContext';
 import { useOrderCursorList, type OrderCursorList } from '@/hooks/useOrderCursorList';
+import { useVisibilityRefresh } from '@/hooks/useVisibilityRefresh';
 import {
   orderNotificationMatchesTray,
   subscribeToOrderNotifications,
@@ -45,6 +46,8 @@ export interface UseOrderTrayInitialFilters {
   datePreset?: OrdersTrayDatePreset;
   /** Vista de archivados resuelta desde `?archived=1`. */
   showArchived?: boolean;
+  /** Término de búsqueda resuelto desde `?search=...`. */
+  search?: string;
 }
 
 interface UseOrderTrayResult extends OrderCursorList {
@@ -114,7 +117,7 @@ export function useOrderTray(
   initialFilters: UseOrderTrayInitialFilters = {},
 ): UseOrderTrayResult {
   const { status, archiveEntity, statusFilters } = config;
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchQuery, setSearchQuery] = useState(initialFilters.search ?? '');
   const [statusFilter, setStatusFilter] = useState<OrdersTrayStatusFilterValue>(
     initialFilters.status ?? 'all',
   );
@@ -151,7 +154,12 @@ export function useOrderTray(
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
-    const filters = { status: statusFilter, datePreset, showArchived };
+    const filters = {
+      status: statusFilter,
+      datePreset,
+      showArchived,
+      search: deferredSearchQuery,
+    };
     const params = buildOrdersTrayFilterSearchParams(
       filters,
       new URLSearchParams(window.location.search),
@@ -165,7 +173,7 @@ export function useOrderTray(
     }
 
     saveOrdersTrayFilters(window.location.pathname, filters);
-  }, [statusFilter, datePreset, showArchived]);
+  }, [statusFilter, datePreset, showArchived, deferredSearchQuery]);
 
   const {
     orders,
@@ -194,6 +202,21 @@ export function useOrderTray(
     setPendingNotificationCount(0);
     refreshSilently();
   }, [refreshSilently]);
+
+  // Al volver tras una ausencia relevante se reemplaza la primera página en
+  // silencio. Si el usuario está escribiendo o confirmando, la lista no se
+  // mueve debajo de sus manos: queda el chip de "nuevos movimientos".
+  useVisibilityRefresh(() => {
+    const busy = pendingConfirm !== null || refreshing || loadingMore || isEditableElementFocused();
+
+    if (busy) {
+      setPendingNotificationCount((count) => Math.max(count, 1));
+      return;
+    }
+
+    setPendingNotificationCount(0);
+    refreshSilently();
+  });
 
   // Puente SSE -> bandeja: si el evento corresponde a este rol y el usuario no
   // está escribiendo ni confirmando, se reemplaza la primera página en

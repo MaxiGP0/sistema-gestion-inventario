@@ -1,7 +1,9 @@
 /**
  * Pruebas del formato de líneas de facturación:
- * - Las líneas con `lineTotal === 0` no se omiten y se marcan como
+ * - Las líneas sin cantidad controlada no se omiten y se marcan como
  *   "Sin controlar/faltante", tanto en el panel como en el texto copiado.
+ * - Una línea controlada con 100% de descuento no es faltante aunque su
+ *   `lineTotal` sea 0.
  * - El motivo guardado por depósito (`pendingReason`) aparece en la línea.
  *
  * Funciones puras, sin base de datos.
@@ -15,6 +17,7 @@ import {
   billingLineQuantity,
   billingPendingDetail,
   formatBillingItemLine,
+  isMissingLine,
   MISSING_LINE_LABEL,
 } from '../lib/billing-order-format';
 
@@ -59,6 +62,48 @@ test('las líneas con total positivo no llevan la marca de faltante', () => {
   assert.doesNotMatch(line, new RegExp(MISSING_LINE_LABEL));
   assert.doesNotMatch(line, /Motivo pendiente/);
   assert.match(line, /Total: \$270\.00/);
+});
+
+test('una línea controlada con 100% de descuento no es faltante aunque su total sea 0', () => {
+  const item = {
+    ...baseItem,
+    verifiedQuantity: 2,
+    itemDiscount: 100,
+    lineTotal: 0,
+  };
+
+  assert.equal(isMissingLine(item), false);
+  assert.equal(billingPendingDetail(item), '');
+
+  const line = formatBillingItemLine(item, 0);
+  assert.doesNotMatch(line, new RegExp(MISSING_LINE_LABEL));
+  assert.doesNotMatch(line, /Motivo pendiente/);
+  assert.match(line, /Cant: 2/);
+  assert.match(line, /Desc: 100%/);
+  assert.match(line, /Total: \$0\.00/);
+});
+
+test('una línea sin cantidad controlada es faltante', () => {
+  const item = { ...baseItem, verifiedQuantity: 0, lineTotal: 0 };
+
+  assert.equal(isMissingLine(item), true);
+  assert.equal(billingPendingDetail(item), 'No verificado en depósito');
+});
+
+test('una línea pendiente sin cantidad verificada es faltante y conserva su motivo', () => {
+  const item = {
+    ...baseItem,
+    verifiedQuantity: 0,
+    isPending: true,
+    pendingReason: 'Sin stock en depósito',
+    lineTotal: 0,
+  };
+
+  assert.equal(isMissingLine(item), true);
+  assert.equal(billingPendingDetail(item), 'Sin stock en depósito');
+
+  const line = formatBillingItemLine(item, 0);
+  assert.match(line, new RegExp(`${MISSING_LINE_LABEL}: Sin stock en depósito`));
 });
 
 test('las líneas parciales muestran el motivo pendiente sin marca de faltante total', () => {

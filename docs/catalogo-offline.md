@@ -15,7 +15,7 @@ La cola de escrituras sigue siendo la única dueña de los pedidos pendientes. E
 catálogo offline es sólo una copia de lectura; nunca reemplaza la validación del
 servidor.
 
-## Formato de IndexedDB (`sgi-offline-catalog`, versión 1)
+## Formato de IndexedDB (`sgi-offline-catalog`, versión 2)
 
 Base: `lib/offline-catalog.ts`.
 
@@ -25,6 +25,7 @@ Base: `lib/offline-catalog.ts`.
 | `brands` | Marcas | `key = userId:_id` | `userId` |
 | `products` | Productos vistos o precargados | `key = userId:_id` | `userId` |
 | `recentClients` | Clientes usados por el usuario | `key = userId:clientId` | `userId`, `lastUsedAt` |
+| `clientLastOrders` | Último pedido conocido por cliente | `key = userId:clientId` | `userId` |
 | `meta` | Última sincronización por dataset | `key = userId:dataset` | `userId`, `dataset` |
 
 Cada registro de catálogo tiene esta forma:
@@ -54,15 +55,61 @@ es una segunda barrera, no la única.
 
 | Dataset | TTL por defecto | Tope por defecto |
 | --- | --- | --- |
-| Clientes | 7 días | 500 |
-| Productos | 7 días | 500 |
+| Clientes | 7 días | 2.000 (`OFFLINE_CATALOG_MAX_CLIENTS`) |
+| Productos | 7 días | 5.000 (`OFFLINE_CATALOG_MAX_PRODUCTS`) |
 | Marcas | 30 días | 500 |
 | Recientes | 7 días (TTL de clientes) | 5 |
 
 Los valores viven en `OFFLINE_CATALOG_DEFAULT_TTL_MS` y
 `OFFLINE_CATALOG_DEFAULT_LIMITS`. Cada función acepta una configuración
 efectiva creada con `buildOfflineCatalogConfig({ ttlMs, limits })`, así se
-pueden ajustar TTL y topes sin tocar la lógica.
+pueden ajustar TTL y topes sin tocar la lógica. Los topes de productos y
+clientes se pueden cambiar por entorno; el valor se inlinea en el bundle
+cliente al compilar. Si el endpoint incremental no está disponible, el
+fallback legacy conserva los topes históricos de 500 por dataset
+(`OFFLINE_CATALOG_LEGACY_LIMITS`).
+
+## Snapshot incremental
+
+`GET /api/catalog/offline-snapshot` exige sesión y devuelve:
+
+```ts
+{
+  success: true,
+  type: 'products' | 'clients',
+  items: [...],
+  nextCursor: string | null,
+  hasMore: boolean,
+  serverTime: string, // ISO
+}
+```
+
+- `type`: dataset pedido.
+- `cursor`: opaco, formado con `updatedAt` + `_id`; también se acepta `page`.
+- `since`: ISO opcional. Sólo devuelve documentos con `updatedAt > since`.
+  En productos el delta incluye las bajas lógicas (`active: false`) para que
+  IndexedDB elimine el registro.
+- `limit`: máximo 500, con 500 por defecto.
+
+El orden es `updatedAt` ascendente y `_id` como desempate. El endpoint crea el
+índice `{ updatedAt: 1, _id: 1 }` si falta. `serverTime` se captura antes de
+consultar, de modo que un cambio ocurrido durante la paginación queda cubierto
+por el delta siguiente.
+
+`syncOfflineCatalog(userId, { onProgress, signal })`:
+
+1. Si no hay un full sync vigente, descarga todas las páginas en memoria.
+2. Recién cuando termina reemplaza el dataset anterior en una transacción
+   (`replace`): una interrupción no borra el snapshot existente.
+3. Guarda `fullSyncAt` y `serverTime` en `meta`.
+4. Los siguientes intentos piden sólo `updatedAt > serverTime`; después de un
+   full se hace un delta inmediato para cerrar la ventana de la descarga.
+5. Emite `{ dataset, loaded, total, phase }` a la UI y aborta limpio con la
+   señal recibida.
+
+El sync automático corre después de la primera pintura. Si
+`navigator.connection.saveData` está activo no se dispara: la tarjeta
+**Catálogo offline** de `/settings/notifications` permite actualizar a mano.
 
 Al leer, los registros vencidos se ignoran y el snapshot queda `fresh: false`.
 La UI revalida en red al montar y al recuperar conexión, así que los datos
@@ -71,7 +118,17 @@ badge queda visible si hay cualquier copia local en uso.
 
 La escritura hace merge por `_id` y conserva los registros más recientes hasta
 el tope. Así una búsqueda no borra el resto del snapshot y la base no crece sin
-control.
+control. Además es incremental: lee los registros existentes una vez, compara
+`updatedAt`/`savedAt` (o una `revision` barata de los campos de la ficha) y sólo
+hace `put` de los nuevos o modificados. Los registros sin cambios conservan su
+`savedAt`; únicamente se borran las claves vencidas o desplazadas por el tope.
+
+Las lecturas de productos/clientes usan una caché en memoria por
+`userId:dataset` con TTL de 30 s. La caché guarda el snapshot y un texto
+normalizado por ítem, de modo que el buscador offline no relee IndexedDB ni
+vuelve a normalizar todos los campos en cada tecla. Se invalida al escribir,
+borrar la base, limpiar un usuario y al recibir
+`OFFLINE_CATALOG_CHANGED_EVENT`.
 
 ## Hidratación y revalidación
 
@@ -88,11 +145,10 @@ control.
    HTML no traía ambos datasets (shell offline); si ya vinieron del Server
    Component no repite esos GET al montar. La revalidación por foco y el evento
    `online` siguen activos.
-5. Tras la primera pintura precarga hasta 500 productos
-   (`prefetchOfflineCatalogProducts`) y 500 clientes
-   (`prefetchOfflineCatalogClients`) si no hay una sincronización completa
-   vigente. El TTL evita repetirlo en cada visita y la primera página del SSR ya
-   no bloquea la descarga del resto.
+5. Tras la primera pintura hace un full sync paginado (hasta 5.000 productos y
+   2.000 clientes por defecto) y luego deltas con `serverTime`. Si el endpoint
+   incremental no existe todavía, cae al prefetch legacy de 500 registros. La
+   primera página del SSR ya no bloquea la descarga del resto.
 6. Cada búsqueda online agrega sus resultados al snapshot; cada búsqueda sin red
    se resuelve localmente por nombre/código con `searchOfflineCatalogClients` y
    `searchOfflineCatalogProducts`.
@@ -109,9 +165,9 @@ copia local.
 1. Al montar con datos del servidor escriben productos/clientes y marcas en el
    snapshot (`rememberOfflineCatalogProducts/Clients/Brands`). Visitar el
    catálogo también deja listo el modo offline.
-2. Después de la primera pintura completan productos y clientes hasta sus
-   topes (500) con `prefetchOfflineCatalogProducts/Clients`, sin bloquear la
-   navegación y una sola vez por TTL.
+2. Después de la primera pintura completan productos y clientes con
+   `syncOfflineCatalog` (full paginado y luego deltas), sin bloquear la
+   navegación. La UI muestra “Actualizando catálogo… X%” mientras corre.
 3. Si `navigator.onLine` es `false` (o una comprobación liviana de red falla),
    activan el modo local y muestran el badge **“Datos guardados; pueden estar
    desactualizados”**.
@@ -148,6 +204,38 @@ muestra arriba del selector (`components/orders/new/RecentClients.tsx`) tanto en
 escritorio como en el modal móvil. Al elegir uno, la lista se actualiza en el
 acto y se vuelve a persistir.
 
+## Último pedido por cliente (repetir sin red)
+
+`rememberOfflineClientLastOrder(userId, clientId, orderSummary)` guarda el
+resumen liviano que devuelve `GET /api/orders?clientId=…&limit=1`. Como
+`ORDER_LIST_SELECT` incluye `items.productId` (referencia escalar, sin
+`populate`) y `paymentConditionDetail`, el alta puede repetir el pedido en un
+solo paso: no hace falta el segundo `GET /api/orders/[id]`. El detalle queda
+sólo como fallback para pedidos históricos a los que les falte `productId`.
+
+La caché se alimenta en dos momentos:
+
+1. al responder la consulta online del último pedido del cliente;
+2. al guardar un alta nueva (online o en la cola offline), para que el próximo
+   pedido del mismo cliente ya la encuentre actualizada.
+
+`readOfflineClientLastOrder(userId, clientId)` devuelve `null` después de 30
+días. Sin red, el alta usa ese resumen para autocompletar factura/condición de
+pago y habilitar **Repetir último pedido**; con red, un fallo de red o timeout
+también cae a la copia local. Cada registro está aislado por `userId`.
+
+El logout borra `clientLastOrders` de forma puntual (`clearUserOfflineData`) y
+además elimina toda la base, igual que el resto del catálogo.
+
+## Sincronización automática al reconectar o volver a foco
+
+`syncOfflineCatalog(userId, { auto: true })` se dispara al montar las pantallas
+de alta/catálogo, en el evento `online` y en la revalidación por foco. Cuando
+productos y clientes ya tienen `serverTime` vigente, el throttle
+`MIN_AUTO_DELTA_INTERVAL_MS` (60 s) permite una sola llamada por ventana: los
+eventos repetidos no vuelven a pedir el mismo delta. La actualización manual
+(`force: true`) no queda bloqueada por el throttle.
+
 ## Limpieza y aislamiento
 
 - **Logout** (`context/UserContext.tsx`): intenta drenar la cola de pedidos y
@@ -158,6 +246,8 @@ acto y se vuelve a persistir.
   - `clearServiceWorkerCaches()`: borra **todas** las cachés de Cache Storage
     (`sgi-static-*`, `sgi-catalog-*`, `sgi-page-*`) y pide al SW que
     reprecachee sólo los estáticos;
+  - `clearOfflineClientLastOrdersForUser(userId)`: borra los últimos pedidos
+    del usuario aunque otra pestaña bloquee el borrado total;
   - `deleteOfflineCatalogDatabase()`: cierra la conexión activa y borra
     `sgi-offline-catalog` completa, incluidos todos los stores;
   - borra los borradores `sgi_order_draft:*`;
@@ -189,12 +279,21 @@ shell `/offline` de siempre.
 
 - `scripts/test-offline-catalog.ts` usa `fake-indexeddb` para verificar formato,
   aislamiento entre usuarios, TTL vencido, búsqueda local, recientes y limpieza.
+  También simula un catálogo de 1.200 productos, el delta por `since`,
+  `saveData=true`, el throttle automático y la caché del último pedido.
+- `scripts/test-order-prefill.ts` verifica que `buildOrderPrefill` arma
+  cantidades y datos comerciales desde un `OrderSummaryDTO` sin segundo fetch y
+  conserva los descuentos de la ficha conocida del cliente.
 - `e2e/offline-catalog.spec.ts` (proyecto Playwright `pwa`) siembra IndexedDB,
   recarga `/orders/new` sin red y comprueba que el cliente/producto guardados
   aparecen, que se puede guardar y encolar, que el TTL vencido no se muestra,
   que el modal de “Agregar Producto” de depósito busca localmente y que el
   logout borra la base. También recorre `/catalog` y `/catalog/clients` online,
   pasa a offline, busca productos/clientes locales y crea un pedido con el
-  cliente preseleccionado.
+  cliente preseleccionado. El seed incluye 560 productos extra para verificar
+  que el full sync supera los 500 y encuentra un producto fuera de esa página
+  después de cortar la red. El caso móvil selecciona un cliente online, recarga
+  sin red y verifica que el autocompletado comercial y **Repetir último pedido**
+  salen de IndexedDB.
 - `scripts/test-pwa-sw.ts` valida que el SW sólo cachee la ruta del alta y que
   el logout borre las cachés.

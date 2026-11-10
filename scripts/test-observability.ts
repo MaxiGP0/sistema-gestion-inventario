@@ -99,7 +99,7 @@ test('normaliza rutas dinámicas y elimina query strings', () => {
   assert.equal(normalizeRoute('/api/health?probe=1'), '/api/health');
   assert.equal(normalizeRoute('/'), '/');
   assert.equal(
-    routeFromUrl('https://inventario.test/api/orders/64f1234567890abcdef12345'),
+    routeFromUrl('https://sgi.test/api/orders/64f1234567890abcdef12345'),
     '/api/orders/[id]',
   );
 });
@@ -195,12 +195,12 @@ test('redacta cuerpos, contraseñas, cookies y query strings', () => {
   const event = scrubEvent({
     message: 'fallo con password=secreto y Bearer abc.def',
     request: {
-      url: 'https://inventario.test/api/orders?token=secreto&cliente=Ana',
+      url: 'https://sgi.test/api/orders?token=secreto&cliente=Ana',
       headers: {
         authorization: 'Bearer secreto',
         cookie: 'session=abc',
         'x-request-id': 'req-12345678',
-        'user-agent': 'SGITest/1.0',
+        'user-agent': 'Sistema de Gestión de InventarioTest/1.0',
       },
       data: { password: 'secreto', cliente: 'Ana' },
       cookies: { session: 'abc' },
@@ -217,7 +217,7 @@ test('redacta cuerpos, contraseñas, cookies y query strings', () => {
       {
         category: 'fetch',
         data: {
-          url: 'https://inventario.test/api/orders?token=secreto',
+          url: 'https://sgi.test/api/orders?token=secreto',
           method: 'POST',
           body: '{"password":"secreto"}',
           status_code: 500,
@@ -235,13 +235,10 @@ test('redacta cuerpos, contraseñas, cookies y query strings', () => {
   assert.equal((event.request as Record<string, unknown>).data, undefined);
   assert.equal((event.request as Record<string, unknown>).cookies, undefined);
   assert.equal((event.request as Record<string, unknown>).query_string, undefined);
-  assert.equal(
-    (event.request as Record<string, unknown>).url,
-    'https://inventario.test/api/orders',
-  );
+  assert.equal((event.request as Record<string, unknown>).url, 'https://sgi.test/api/orders');
   assert.deepEqual((event.request as Record<string, unknown>).headers, {
     'x-request-id': 'req-12345678',
-    'user-agent': 'SGITest/1.0',
+    'user-agent': 'Sistema de Gestión de InventarioTest/1.0',
   });
   assert.equal(event.user, undefined);
   assert.equal((event.extra as Record<string, unknown>).safe, 'ok');
@@ -252,7 +249,7 @@ test('redacta cuerpos, contraseñas, cookies y query strings', () => {
   assert.equal((fetchBreadcrumb.data as Record<string, unknown>).body, undefined);
   assert.equal(
     (fetchBreadcrumb.data as Record<string, unknown>).url,
-    'https://inventario.test/api/orders',
+    'https://sgi.test/api/orders',
   );
 
   assert.equal(redactText('password=abc123'), `password=${REDACTED}`);

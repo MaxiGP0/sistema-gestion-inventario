@@ -17,6 +17,7 @@ import mongoose from 'mongoose';
 
 import { Brand } from '../models/Brand';
 import { Product } from '../models/Product';
+import { buildBrandSearchFilter, buildProductSearchFilter } from '../lib/search-query';
 import { buildProductSearchFields, normalizeSearchText } from '../lib/search-normalize';
 import { authRequest } from './test-auth-utils';
 
@@ -33,6 +34,7 @@ type FindCapture = {
 const brandId = new mongoose.Types.ObjectId().toString();
 const finds: FindCapture[] = [];
 const brandFinds: Record<string, unknown>[] = [];
+let brandMatches: Array<{ _id: mongoose.Types.ObjectId; name: string }> = [];
 
 let GET: (request: Request) => Promise<Response>;
 
@@ -73,7 +75,7 @@ before(async () => {
   mock.method(Brand as any, 'find', (query: Record<string, unknown>) => {
     brandFinds.push(query);
     return {
-      select: () => ({ lean: async () => [] }),
+      select: () => ({ lean: async () => brandMatches }),
     };
   });
 
@@ -85,15 +87,86 @@ after(() => mock.restoreAll());
 const reset = () => {
   finds.length = 0;
   brandFinds.length = 0;
+  brandMatches = [];
 };
 
 test('normaliza nombre y código de producto (acentos y mayúsculas)', () => {
   assert.equal(normalizeSearchText('  GÓMEZ   Núñez  '), 'gomez nunez');
-  assert.deepEqual(buildProductSearchFields({ name: 'Bagó GÓMEZ', code: 'Ñ-10' }), {
-    searchName: 'bago gomez',
+  assert.deepEqual(buildProductSearchFields({ name: 'DermaPlus GÓMEZ', code: 'Ñ-10' }), {
+    searchName: 'dermaplus gomez',
     searchCode: 'n-10',
-    searchTokens: ['n', '10', 'bago', 'gomez'],
+    searchTokens: ['n', '10', 'dermaplus', 'gomez'],
   });
+  assert.deepEqual(
+    buildProductSearchFields({
+      name: 'Jabón Líquido 400ml',
+      code: 'JAB-400',
+      brandName: 'BioSalud',
+    }),
+    {
+      searchName: 'jabon liquido 400ml',
+      searchCode: 'jab-400',
+      searchTokens: ['jab', '400', 'jabon', 'liquido', '400ml', 'biosalud'],
+    },
+  );
+  assert.deepEqual(
+    buildProductSearchFields({
+      name: 'Jabón Líquido 400ml',
+      code: 'JAB-400',
+      brandId: { name: 'BioSalud' },
+    }).searchTokens,
+    ['jab', '400', 'jabon', 'liquido', '400ml', 'biosalud'],
+    'un brandId poblado también aporta el nombre de la marca',
+  );
+});
+
+test('buildBrandSearchFilter compara cada token contra el prefijo del nombre', () => {
+  assert.deepEqual(buildBrandSearchFilter('biosalud 400'), {
+    $or: [
+      { searchName: /^biosalud/ },
+      { searchName: /^400/ },
+      { searchName: { $exists: false }, name: /biosalud/i },
+      { searchName: { $exists: false }, name: /400/i },
+    ],
+  });
+});
+
+test('buildProductSearchFilter descuenta los tokens de la marca y exige el resto al producto', () => {
+  const matchingBrandId = new mongoose.Types.ObjectId();
+  const filter = buildProductSearchFilter('biosalud 400', [
+    { _id: matchingBrandId, name: 'BioSalud' },
+  ])!;
+  const [brandBranch, indexed] = filter.$or as any[];
+
+  assert.deepEqual(indexed, { searchTokens: { $all: [/^biosalud/, /^400/] } });
+  assert.deepEqual(brandBranch, {
+    $and: [
+      { brandId: { $in: [matchingBrandId] } },
+      {
+        $or: [
+          { searchTokens: { $all: [/^400/] } },
+          {
+            searchTokens: { $exists: false },
+            $and: [
+              {
+                $or: [
+                  { searchName: /^400/ },
+                  { searchCode: /^400/ },
+                  { searchName: { $exists: false }, name: /400/i },
+                  { searchCode: { $exists: false }, code: /400/i },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  const brandOnly = buildProductSearchFilter('biosalud', [
+    { _id: matchingBrandId, name: 'BioSalud' },
+  ])!;
+  assert.deepEqual((brandOnly.$or as any[])[0], { brandId: { $in: [matchingBrandId] } });
 });
 
 test('el schema declara el único de brandId+code, los compuestos de listado y los de prefijo', () => {
@@ -111,8 +184,9 @@ test('el schema declara el único de brandId+code, los compuestos de listado y l
       { searchName: 1, active: 1 },
       { searchCode: 1, active: 1 },
       { searchTokens: 1, active: 1 },
+      { updatedAt: 1, _id: 1 },
     ],
-    'el catálogo debe tener índices para marca+activo, orden por nombre y búsqueda multikey',
+    'el catálogo debe tener índices para marca+activo, orden, búsqueda multikey y snapshot',
   );
   assert.equal(declared[0].options.unique, true, 'brandId+code debe seguir siendo único');
 });
@@ -203,4 +277,47 @@ test('GET /api/products?search= exige todos los tokens aunque estén en cualquie
 
   assert.deepEqual(indexed.searchTokens.$all, [/^shampoo/, /^400/]);
   assert.deepEqual(finds[0].query.active, { $ne: false });
+});
+
+test('GET /api/products?search=biosalud 400 resuelve la marca por token y exige el resto', async () => {
+  reset();
+  const matchingBrandId = new mongoose.Types.ObjectId();
+  brandMatches = [{ _id: matchingBrandId, name: 'BioSalud' }];
+
+  const response = await GET(
+    authRequest(`http://localhost/api/products?search=${encodeURIComponent('biosalud 400')}`),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(brandFinds.length, 1);
+  assert.deepEqual((brandFinds[0].$or as any[]).slice(0, 2), [
+    { searchName: /^biosalud/ },
+    { searchName: /^400/ },
+  ]);
+
+  const queryOr = finds[0].query.$or as any[];
+  assert.deepEqual(queryOr[0], {
+    $and: [
+      { brandId: { $in: [matchingBrandId] } },
+      {
+        $or: [
+          { searchTokens: { $all: [/^400/] } },
+          {
+            searchTokens: { $exists: false },
+            $and: [
+              {
+                $or: [
+                  { searchName: /^400/ },
+                  { searchCode: /^400/ },
+                  { searchName: { $exists: false }, name: /400/i },
+                  { searchCode: { $exists: false }, code: /400/i },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(queryOr[1], { searchTokens: { $all: [/^biosalud/, /^400/] } });
 });

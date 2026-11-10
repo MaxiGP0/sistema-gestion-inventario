@@ -23,6 +23,9 @@ import { Client } from '../models/Client';
 import { Notification } from '../models/Notification';
 import { Order } from '../models/Order';
 import { Product } from '../models/Product';
+import { User } from '../models/User';
+import { invalidateCurrentSessionCache } from '../lib/current-session-cache';
+import type { UserRole } from '../lib/authz';
 import {
   SSE_HEARTBEAT_MS,
   SSE_MAX_CONNECTIONS_PER_IP,
@@ -33,6 +36,12 @@ import {
   type CreateEventStreamOptions,
 } from '../lib/sse';
 import { notificationInboxForRole, notificationMatchesInbox } from '../lib/notification-inbox';
+import {
+  applyLiveNotification,
+  countUnreadNotifications,
+  parseNotificationEventPayload,
+} from '../lib/notification-live';
+import type { NotificationEventPayload, UserNotificationDTO } from '../lib/types/notification';
 import {
   ORDER_NOTIFICATION_EVENT,
   emitOrderNotification,
@@ -136,8 +145,64 @@ function parseSseEvent(chunk: string | null): { id: string; data: Record<string,
 
 let POST: (request: Request) => Promise<Response>;
 let PUT: (request: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response>;
+let POST_NOTIFICATION: (request: Request) => Promise<Response>;
 
 let createdNotification: any = null;
+
+const NOTIFICATION_CREATED_AT = new Date('2026-01-01T12:00:00.000Z');
+
+const livePayload = (
+  id: string,
+  overrides: Partial<NotificationEventPayload> = {},
+): NotificationEventPayload => ({
+  id,
+  title: `Título ${id}`,
+  message: `Mensaje ${id}`,
+  createdAt: NOTIFICATION_CREATED_AT.toISOString(),
+  targetRole: 'deposit',
+  ...overrides,
+});
+
+const SSE_USER_ID = '0000000000000000000000e1';
+const sseUsers = new Map<
+  string,
+  {
+    _id: string;
+    username: string;
+    role: UserRole;
+    active: boolean;
+    sessionVersion: number;
+    notificationsEnabled: boolean;
+  }
+>();
+
+function setSseUser({
+  role = 'vendedor',
+  active = true,
+  sessionVersion = 0,
+}: { role?: UserRole; active?: boolean; sessionVersion?: number } = {}) {
+  sseUsers.set(SSE_USER_ID, {
+    _id: SSE_USER_ID,
+    username: `test-${role}`,
+    role,
+    active,
+    sessionVersion,
+    notificationsEnabled: true,
+  });
+  invalidateCurrentSessionCache(SSE_USER_ID);
+}
+
+/** Mock de `User.findById` solo para los tests de la guarda de /api/events. */
+function mockSseUserLookup() {
+  return mock.method(User as any, 'findById', (id: unknown) => {
+    const record = sseUsers.get(String(id));
+    const chain: any = {
+      select: () => chain,
+      lean: async () => (record ? { ...record } : null),
+    };
+    return chain;
+  });
+}
 
 const fakeClient: any = {
   _id: clientId,
@@ -186,12 +251,18 @@ before(async () => {
   mock.method(Order as any, 'create', async (doc: any) => ({ _id: orderId, ...doc }));
   mock.method(Order as any, 'findById', () => ({ populate: async () => orderDoc }));
   mock.method(Notification as any, 'create', async (doc: any) => {
-    createdNotification = { _id: oid(), read: false, ...doc };
+    createdNotification = {
+      _id: oid(),
+      read: false,
+      ...doc,
+      createdAt: NOTIFICATION_CREATED_AT,
+    };
     return createdNotification;
   });
 
   ({ POST } = await import('../app/api/orders/route'));
   ({ PUT } = await import('../app/api/orders/[id]/route'));
+  ({ POST: POST_NOTIFICATION } = await import('../app/api/notifications/route'));
 });
 
 after(() => mock.restoreAll());
@@ -202,6 +273,85 @@ test('GET /api/events responde 401 sin cookie de sesión', async () => {
 
   const payload = await response.json();
   assert.equal(payload.error, 'Sesión requerida');
+});
+
+test('GET /api/events responde 401 si el usuario fue desactivado', async (t) => {
+  setSseUser({ role: 'vendedor', active: false, sessionVersion: 1 });
+  const lookup = mockSseUserLookup();
+  t.after(() => {
+    invalidateCurrentSessionCache(SSE_USER_ID);
+    lookup.mock.restore();
+  });
+
+  const response = await getEvents(
+    authRequest('http://localhost/api/events', {}, 'vendedor', SSE_USER_ID, 1),
+  );
+
+  assert.equal(response.status, 401);
+  assert.match(response.headers.get('set-cookie') || '', /Max-Age=0/i);
+});
+
+test('GET /api/events responde 401 si la sessionVersion quedó vieja', async (t) => {
+  setSseUser({ role: 'admin', active: true, sessionVersion: 1 });
+  const lookup = mockSseUserLookup();
+  t.after(() => {
+    invalidateCurrentSessionCache(SSE_USER_ID);
+    lookup.mock.restore();
+  });
+
+  const response = await getEvents(
+    authRequest('http://localhost/api/events', {}, 'admin', SSE_USER_ID, 0),
+  );
+
+  assert.equal(response.status, 401, 'un cambio de rol/baja invalida la conexión vieja');
+  assert.match(response.headers.get('set-cookie') || '', /Max-Age=0/i);
+});
+
+test('el heartbeat cierra con session-expired si cambió la sessionVersion', async () => {
+  mock.timers.enable({ apis: ['setInterval'] });
+  try {
+    const sse = new SseReader(
+      createEventStream({
+        userId: SSE_USER_ID,
+        inbox: 'vendor',
+        sessionVersion: 0,
+        verifySession: async () => ({ active: true, sessionVersion: 1, inbox: 'vendor' }),
+      }).getReader(),
+    );
+
+    assert.equal(await sse.nextEvent(1000), ': connected');
+
+    mock.timers.tick(SSE_HEARTBEAT_MS);
+
+    const expired = await sse.nextEvent(1000);
+    assert.ok(expired?.includes('event: session-expired'), expired ?? 'sin evento');
+    assert.ok(expired?.includes('"reason":"session-expired"'));
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('el heartbeat cierra con session-expired si el rol cambia de bandeja', async () => {
+  mock.timers.enable({ apis: ['setInterval'] });
+  try {
+    const sse = new SseReader(
+      createEventStream({
+        userId: SSE_USER_ID,
+        inbox: 'vendor',
+        sessionVersion: 0,
+        verifySession: async () => ({ active: true, sessionVersion: 0, inbox: 'billing' }),
+      }).getReader(),
+    );
+
+    assert.equal(await sse.nextEvent(1000), ': connected');
+
+    mock.timers.tick(SSE_HEARTBEAT_MS);
+
+    const expired = await sse.nextEvent(1000);
+    assert.ok(expired?.includes('event: session-expired'), expired ?? 'sin evento');
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test('la bandeja SSE se deriva del rol y el evento corresponde a su inbox', () => {
@@ -226,6 +376,70 @@ test('NotificationsBell ignora eventos SSE de otro inbox antes de refrescar', ()
   assert.equal(notificationMatchesInbox('billing', 'deposit'), false);
   assert.equal(notificationMatchesInbox('deposit', 'all'), true);
   assert.equal(notificationMatchesInbox('all', 'billing'), true);
+});
+
+test('el reducer de la campana deduplica, inserta arriba y actualiza no leídas', () => {
+  const base: UserNotificationDTO[] = [
+    {
+      _id: 'vieja-leida',
+      title: 'Vieja leída',
+      message: 'Ya vista',
+      targetRole: 'deposit',
+      createdAt: '2026-01-01T09:00:00.000Z',
+      read: true,
+      readAt: '2026-01-01T09:05:00.000Z',
+    },
+    {
+      _id: 'vieja-leida-2',
+      title: 'Otra vieja leída',
+      message: 'Ya vista',
+      targetRole: 'deposit',
+      createdAt: '2026-01-01T09:10:00.000Z',
+      read: true,
+      readAt: '2026-01-01T09:15:00.000Z',
+    },
+  ];
+
+  const firstPayload = livePayload('evento-1');
+  const once = applyLiveNotification(base, firstPayload, 3);
+
+  assert.deepEqual(
+    once.map((notification) => notification._id),
+    ['evento-1', 'vieja-leida', 'vieja-leida-2'],
+  );
+  assert.equal(once[0].read, false, 'la notificación nueva entra como no leída');
+  assert.equal(countUnreadNotifications(once), 1, 'el contador sube con la nueva');
+
+  // Un replay del mismo id no duplica ni pisa la copia local.
+  const duplicate = applyLiveNotification(once, { ...firstPayload, title: 'Título repetido' }, 3);
+  assert.deepEqual(
+    duplicate.map((notification) => notification._id),
+    ['evento-1', 'vieja-leida', 'vieja-leida-2'],
+  );
+  assert.equal(duplicate[0].title, firstPayload.title);
+  assert.equal(countUnreadNotifications(duplicate), 1);
+
+  // La segunda notificación también entra arriba y la lista se recorta a la
+  // página visible (3): se descarta la más vieja.
+  const second = applyLiveNotification(duplicate, livePayload('evento-2'), 3);
+  assert.deepEqual(
+    second.map((notification) => notification._id),
+    ['evento-2', 'evento-1', 'vieja-leida'],
+  );
+  assert.equal(countUnreadNotifications(second), 2);
+});
+
+test('el payload SSE inválido o incompleto se descarta para caer al GET', () => {
+  assert.deepEqual(parseNotificationEventPayload(livePayload('ok')), livePayload('ok'));
+  assert.equal(parseNotificationEventPayload(null), null);
+  assert.equal(parseNotificationEventPayload('texto'), null);
+  assert.equal(parseNotificationEventPayload({ ...livePayload('ok'), id: '' }), null);
+  assert.equal(
+    parseNotificationEventPayload({ ...livePayload('ok'), createdAt: 'no-es-fecha' }),
+    null,
+  );
+  assert.equal(parseNotificationEventPayload({ ...livePayload('ok'), targetRole: 'otro' }), null);
+  assert.equal(parseNotificationEventPayload({ ...livePayload('ok'), orderId: 123 }), null);
 });
 
 test('el evento de bandeja valida rol/pedido y respeta los comodines de inbox', () => {
@@ -335,6 +549,44 @@ test('broadcastEvent entrega solo a la bandeja correspondiente y a la global', a
     const event = parseSseEvent(await reader.nextEvent(1000));
     assert.equal(event.id, globalId, 'las alertas globales llegan a todas las bandejas');
   }
+
+  await Promise.all([deposit.cancel(), billing.cancel(), all.cancel()]);
+});
+
+test('el payload notification llega solo a la bandeja destinataria', async () => {
+  const deposit = openSse({ inbox: 'deposit' });
+  const billing = openSse({ inbox: 'billing' });
+  const all = openSse({ inbox: 'all' });
+
+  for (const reader of [deposit, billing, all]) {
+    assert.equal(await reader.nextEvent(1000), ': connected');
+  }
+
+  const notification: NotificationEventPayload = {
+    id: 'notificacion-deposito',
+    title: 'Nuevo Pedido (Borrador)',
+    message: 'El vendedor creó un pedido',
+    createdAt: NOTIFICATION_CREATED_AT.toISOString(),
+    targetRole: 'deposit',
+    orderId: orderIdStr,
+  };
+
+  const eventId = broadcastEvent({
+    type: 'notification',
+    targetRole: 'deposit',
+    orderId: orderIdStr,
+    notification,
+  });
+
+  const depositEvent = parseSseEvent(await deposit.nextEvent(1000));
+  assert.equal(depositEvent.id, eventId);
+  assert.deepEqual(depositEvent.data.notification, notification);
+
+  assert.equal(await billing.nextEvent(50), null, 'facturación no recibe el evento');
+
+  const adminEvent = parseSseEvent(await all.nextEvent(1000));
+  assert.equal(adminEvent.id, eventId, 'el admin global recibe el aviso liviano');
+  assert.equal('notification' in adminEvent.data, false, 'pero sin la carga completa');
 
   await Promise.all([deposit.cancel(), billing.cancel(), all.cancel()]);
 });
@@ -514,6 +766,14 @@ test('POST /api/orders emite SSE a depósito al crear el borrador', async () => 
   assert.equal(event.id, String(createdNotification._id));
   assert.equal(event.data.targetRole, 'deposit');
   assert.equal(event.data.orderId, orderIdStr);
+  assert.deepEqual(event.data.notification, {
+    id: String(createdNotification._id),
+    title: createdNotification.title,
+    message: createdNotification.message,
+    createdAt: NOTIFICATION_CREATED_AT.toISOString(),
+    targetRole: 'deposit',
+    orderId: orderIdStr,
+  });
 
   await sse.cancel();
 });
@@ -547,6 +807,14 @@ test('PUT /api/orders/[id] emite SSE a facturación al verificarse el pedido', a
   assert.equal(event.id, String(createdNotification._id));
   assert.equal(event.data.targetRole, 'billing');
   assert.equal(event.data.orderId, orderIdStr);
+  assert.deepEqual(event.data.notification, {
+    id: String(createdNotification._id),
+    title: createdNotification.title,
+    message: createdNotification.message,
+    createdAt: NOTIFICATION_CREATED_AT.toISOString(),
+    targetRole: 'billing',
+    orderId: orderIdStr,
+  });
 
   // Un update sin notificación (solo comentario) no emite nada.
   const commentResponse = await PUT(
@@ -568,6 +836,54 @@ test('PUT /api/orders/[id] emite SSE a facturación al verificarse el pedido', a
   );
   assert.equal(commentResponse.status, 200);
   assert.equal(await sse.nextEvent(50), null);
+
+  await sse.cancel();
+});
+
+test('POST /api/notifications manual emite el payload persistido', async (t) => {
+  setSseUser({ role: 'admin', active: true, sessionVersion: 0 });
+  const lookup = mockSseUserLookup();
+  t.after(() => {
+    invalidateCurrentSessionCache(SSE_USER_ID);
+    lookup.mock.restore();
+  });
+
+  createdNotification = null;
+  const sse = openSse({ inbox: 'deposit' });
+  assert.equal(await sse.nextEvent(1000), ': connected');
+
+  const response = await POST_NOTIFICATION(
+    authRequest(
+      'http://localhost/api/notifications',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: 'Aviso manual',
+          message: 'Mensaje para depósito',
+          targetRole: 'deposit',
+          orderId: orderIdStr,
+        }),
+      },
+      'admin',
+      SSE_USER_ID,
+      0,
+    ),
+  );
+
+  assert.equal(response.status, 200);
+  await waitFor(() => createdNotification !== null, 'la notificación debe persistirse');
+
+  const event = parseSseEvent(await sse.nextEvent(1000));
+  assert.equal(event.id, String(createdNotification._id));
+  assert.deepEqual(event.data.notification, {
+    id: String(createdNotification._id),
+    title: 'Aviso manual',
+    message: 'Mensaje para depósito',
+    createdAt: NOTIFICATION_CREATED_AT.toISOString(),
+    targetRole: 'deposit',
+    orderId: orderIdStr,
+  });
 
   await sse.cancel();
 });

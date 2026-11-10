@@ -12,6 +12,7 @@ import {
   E2E_CLIENTS,
   E2E_DASHBOARD_ADMIN_ORDER,
   E2E_DASHBOARD_SELLER_ORDERS,
+  E2E_OFFLINE_CATALOG,
   E2E_PASSWORD,
   E2E_PRODUCTS,
   E2E_SECONDARY_BRAND,
@@ -104,6 +105,24 @@ export async function seedE2EDatabase(uri: string): Promise<void> {
       },
     ]);
 
+    // Más de 500 productos para verificar que el snapshot offline ya no se
+    // queda con la primera página histórica. Van a la segunda marca para no
+    // alterar el alcance de los ajustes masivos de E2E Laboratorio.
+    await Product.insertMany(
+      Array.from({ length: E2E_OFFLINE_CATALOG.productCount }, (_, index) => {
+        const position = index + 1;
+        const price = 100 + position;
+        return {
+          brandId: secondaryBrand._id,
+          code: E2E_OFFLINE_CATALOG.codeFor(position),
+          name: E2E_OFFLINE_CATALOG.nameFor(position),
+          price,
+          priceWithIva: Number((price * 1.21).toFixed(2)),
+          active: true,
+        };
+      }),
+    );
+
     const clients = await Client.create(
       Object.values(E2E_CLIENTS).map((client) => ({ ...client, brandDiscounts: [] })),
     );
@@ -166,7 +185,8 @@ export async function seedE2EDatabase(uri: string): Promise<void> {
 
     console.log(
       `[e2e] Seed listo en "${databaseNameFromUri(uri)}": ` +
-        `${users.length} usuarios, ${clients.length} clientes, 3 productos y ` +
+        `${users.length} usuarios, ${clients.length} clientes, ` +
+        `${3 + E2E_OFFLINE_CATALOG.productCount} productos y ` +
         `${E2E_DASHBOARD_SELLER_ORDERS.length + 1} pedidos del panel.`,
     );
   } finally {

@@ -9,14 +9,15 @@
  * - Invalidación: `invalidateCatalogCache(...)` limpia entradas y aborta
  *   consultas en curso. Se llama después de mutar productos/marcas/clientes.
  * - Foco: `subscribeCatalogFocus()` registra un único listener de
- *   `focus`/`visibilitychange`; al volver a la pestaña invalida todo y avisa a
- *   los suscriptores para que vuelvan a consultar.
+ *   `focus`/`visibilitychange`/bfcache. Al volver a la pestaña sólo invalida
+ *   todo si estuvo oculta más de 30 s; si la ausencia fue corta, únicamente
+ *   descarta las entradas que ya vencieron por TTL natural.
  *
  * Sólo debe importarse desde componentes/hooks de cliente. No reemplaza la
  * caché del servidor (`lib/catalog-cache.ts`): son capas independientes.
  */
 
-import { api, type ApiRequestOptions } from './api-client';
+import { api, CATALOG_REQUEST_TIMEOUT_MS, type ApiRequestOptions } from './api-client';
 
 export type CatalogResource = 'products' | 'brands' | 'clients';
 
@@ -48,9 +49,11 @@ const cache = new Map<string, CacheEntry>();
 const inFlight = new Map<string, InFlightEntry>();
 const focusListeners = new Set<() => void>();
 
+/** Ausencia mínima para invalidar todo el catálogo al volver a la pestaña. */
+export const CATALOG_FOCUS_REVALIDATE_AFTER_MS = 30_000;
+
 let focusInstalled = false;
-let lastFocusRevalidation = 0;
-const FOCUS_COOLDOWN_MS = 1_000;
+let hiddenAt: number | null = null;
 
 /** Devuelve el recurso cacheable de una URL, o `null` si no corresponde. */
 export function catalogResourceForUrl(url: string): CatalogResource | null {
@@ -133,7 +136,12 @@ export async function getCatalog<T>(url: string, options: CatalogRequestOptions 
     return api.get<T>(url, requestOptions);
   }
 
-  const { force = false, signal, ...requestOptions } = options;
+  const {
+    force = false,
+    signal,
+    timeoutMs = CATALOG_REQUEST_TIMEOUT_MS,
+    ...requestOptions
+  } = options;
   const now = Date.now();
 
   if (!force) {
@@ -170,6 +178,7 @@ export async function getCatalog<T>(url: string, options: CatalogRequestOptions 
       // HTTP que el navegador guardó con `Cache-Control: max-age`.
       cache: 'no-cache',
       ...requestOptions,
+      timeoutMs,
       signal: controller.signal,
     })
     .then((value) => {
@@ -212,8 +221,7 @@ export function invalidateCatalogCache(...resources: CatalogResource[]): void {
   }
 }
 
-function notifyFocusRevalidation(): void {
-  invalidateCatalogCache();
+function notifyFocusListeners(): void {
   for (const listener of focusListeners) {
     try {
       listener();
@@ -224,30 +232,89 @@ function notifyFocusRevalidation(): void {
 }
 
 /**
- * Revalida manualmente todo el catálogo (también se usa en tests). Invalida la
- * caché, aborta consultas en curso y avisa a los suscriptores de foco.
+ * Descarta sólo las entradas vencidas por TTL. Devuelve `true` si había alguna
+ * para que el foco pueda avisar a las vistas que están mostrando esos datos.
+ */
+function pruneExpiredEntries(now: number): boolean {
+  let removed = false;
+
+  for (const [url, entry] of cache) {
+    if (entry.expiresAt > now) continue;
+    cache.delete(url);
+    removed = true;
+  }
+
+  return removed;
+}
+
+/** Decide si el regreso a la pestaña justifica revalidar el catálogo. */
+export function shouldRevalidateCatalogOnVisible(
+  state: { hiddenAt: number | null; now: number; hasExpiredEntries?: boolean },
+  minHiddenMs = CATALOG_FOCUS_REVALIDATE_AFTER_MS,
+): boolean {
+  if (state.hasExpiredEntries) return true;
+  if (state.hiddenAt === null) return false;
+  return state.now - state.hiddenAt >= minHiddenMs;
+}
+
+/**
+ * Revalida manualmente todo el catálogo (también se usa en tests y después de
+ * mutaciones). Invalida la caché, aborta consultas en curso y avisa a los
+ * suscriptores de foco.
  */
 export function revalidateCatalogOnFocus(): void {
-  notifyFocusRevalidation();
+  invalidateCatalogCache();
+  notifyFocusListeners();
 }
 
 function installFocusListener(): void {
   if (focusInstalled || typeof window === 'undefined') return;
   focusInstalled = true;
 
-  const onFocus = () => {
+  const markHidden = () => {
+    if (hiddenAt === null) hiddenAt = Date.now();
+  };
+
+  const handleVisible = () => {
     const now = Date.now();
-    if (now - lastFocusRevalidation < FOCUS_COOLDOWN_MS) return;
-    lastFocusRevalidation = now;
-    notifyFocusRevalidation();
+    const hiddenSince = hiddenAt;
+    hiddenAt = null;
+
+    const hasExpiredEntries = pruneExpiredEntries(now);
+    if (
+      !shouldRevalidateCatalogOnVisible({
+        hiddenAt: hiddenSince,
+        now,
+        hasExpiredEntries,
+      })
+    ) {
+      return;
+    }
+
+    // Ausencia larga: todo el catálogo se considera viejo aunque el TTL de una
+    // entrada puntual todavía no haya vencido. Ausencia corta: ya se quitaron
+    // las entradas vencidas y el resto se conserva.
+    if (hiddenSince !== null && now - hiddenSince >= CATALOG_FOCUS_REVALIDATE_AFTER_MS) {
+      invalidateCatalogCache();
+    }
+    notifyFocusListeners();
+  };
+
+  const onFocus = () => {
+    if (document.visibilityState === 'hidden') return;
+    handleVisible();
   };
 
   const onVisibilityChange = () => {
-    if (document.visibilityState === 'visible') onFocus();
+    if (document.visibilityState === 'hidden') markHidden();
+    else handleVisible();
   };
 
   window.addEventListener('focus', onFocus);
   document.addEventListener('visibilitychange', onVisibilityChange);
+  // bfcache: al restaurar la página no siempre llega visibilitychange.
+  window.addEventListener('pagehide', markHidden);
+  window.addEventListener('pageshow', handleVisible);
 }
 
 /**

@@ -10,6 +10,7 @@ import { test } from 'node:test';
 
 import {
   clearPickingAutosave,
+  clearPickingAutosaveComment,
   getPickingAutosaveStorageKey,
   loadPickingAutosave,
   parsePickingAutosave,
@@ -212,6 +213,101 @@ test('parsePickingAutosave tolera JSON roto y sanea entradas inválidas', () => 
   assert.equal(parsed?.items.texto, undefined);
   assert.equal(parsed?.items.sinControl, undefined);
   assert.equal(parsed?.items.noObjeto, undefined);
+});
+
+test('el snapshot conserva un comentario pendiente aunque no tenga líneas', () => {
+  const storage = new MemoryStorage();
+  const saved = snapshot({
+    items: {},
+    pendingComment: '  Falta stock del proveedor  ',
+  });
+
+  assert.equal(savePickingAutosave(storage, saved), true);
+
+  const loaded = loadPickingAutosave(storage, {
+    orderId: 'pedido-1',
+    userId: 'usuario-1',
+    version: 3,
+    now: NOW,
+  });
+
+  assert.equal(loaded?.pendingComment, 'Falta stock del proveedor');
+  assert.deepEqual(loaded?.items, {});
+});
+
+test('clearPickingAutosaveComment quita sólo el comentario y conserva el picking', () => {
+  const storage = new MemoryStorage();
+  assert.equal(
+    savePickingAutosave(
+      storage,
+      snapshot({
+        pendingComment: 'Comentario sin red',
+      }),
+    ),
+    true,
+  );
+
+  assert.equal(clearPickingAutosaveComment(storage, 'usuario-1', 'pedido-1'), true);
+
+  const loaded = loadPickingAutosave(storage, {
+    orderId: 'pedido-1',
+    userId: 'usuario-1',
+    version: 3,
+    now: NOW,
+  });
+  assert.equal(loaded?.pendingComment, undefined);
+  assert.deepEqual(loaded?.items, snapshot().items);
+  assert.equal(clearPickingAutosaveComment(storage, 'usuario-1', 'pedido-1'), false);
+});
+
+test('un comentario pendiente solo se elimina del storage al limpiarlo', () => {
+  const storage = new MemoryStorage();
+  assert.equal(
+    savePickingAutosave(storage, snapshot({ items: {}, pendingComment: 'Sólo comentario' })),
+    true,
+  );
+
+  assert.equal(clearPickingAutosaveComment(storage, 'usuario-1', 'pedido-1'), true);
+  assert.equal(storage.getItem(getPickingAutosaveStorageKey('usuario-1', 'pedido-1')), null);
+});
+
+test('al sincronizar un comentario el snapshot se reasocia a la versión nueva sin perder líneas', () => {
+  const storage = new MemoryStorage();
+  const original = snapshot({ pendingComment: 'Comentario sin red' });
+
+  assert.equal(savePickingAutosave(storage, original), true);
+
+  // Lo que hace el detalle de depósito cuando el PUT del comentario devuelve
+  // la versión siguiente: reescribe el mismo picking con la versión nueva y
+  // sin el comentario ya enviado.
+  const rebased: PickingAutosaveSnapshot = {
+    ...original,
+    version: original.version + 1,
+    savedAt: NOW,
+    pendingComment: undefined,
+  };
+
+  assert.equal(savePickingAutosave(storage, rebased), true);
+
+  assert.equal(
+    loadPickingAutosave(storage, {
+      orderId: 'pedido-1',
+      userId: 'usuario-1',
+      version: original.version,
+      now: NOW,
+    }),
+    null,
+    'la versión anterior ya no debe ofrecerse para restaurar',
+  );
+
+  const loaded = loadPickingAutosave(storage, {
+    orderId: 'pedido-1',
+    userId: 'usuario-1',
+    version: original.version + 1,
+    now: NOW,
+  });
+  assert.deepEqual(loaded?.items, original.items);
+  assert.equal(loaded?.pendingComment, undefined);
 });
 
 test('clearPickingAutosave borra sólo el pedido indicado', () => {

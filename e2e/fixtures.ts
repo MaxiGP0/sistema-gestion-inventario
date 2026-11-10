@@ -49,6 +49,17 @@ export const E2E_PRODUCTS = {
   },
 } as const;
 
+/**
+ * Productos extra para el E2E de catálogo offline. Los nombres empiezan con "Z"
+ * para no desplazar los productos deterministas de la primera página.
+ */
+export const E2E_OFFLINE_CATALOG = {
+  productCount: 560,
+  targetIndex: 550,
+  codeFor: (index: number) => `E2E-OFFLINE-${String(index).padStart(4, '0')}`,
+  nameFor: (index: number) => `Z Producto E2E Offline ${String(index).padStart(4, '0')}`,
+} as const;
+
 export const E2E_CLIENTS = {
   fullFlow: {
     code: 'E2E-CLI-001',

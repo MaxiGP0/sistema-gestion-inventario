@@ -15,7 +15,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { NotificationTargetRole } from './types/notification';
+import type { NotificationEventPayload, NotificationTargetRole } from './types/notification';
 import { notificationMatchesInbox } from './notification-inbox';
 
 export type SseInbox = NotificationTargetRole;
@@ -29,6 +29,46 @@ export interface SseEvent {
   targetUsername?: string;
   orderId?: string;
   eventId?: string;
+  /**
+   * Notificación persistida. Solo se envía a las conexiones de la bandeja
+   * destinataria; el resto recibe el evento liviano para hacer un GET.
+   */
+  notification?: NotificationEventPayload;
+}
+
+/** Documento mínimo necesario para armar la carga útil SSE. */
+export interface SseNotificationSource {
+  id: unknown;
+  title: string;
+  message: string;
+  createdAt?: Date | string | null;
+  targetRole: NotificationTargetRole;
+  orderId?: unknown;
+}
+
+/**
+ * Convierte una notificación persistida al payload serializable del evento.
+ * Se usa tanto en los flujos de pedidos como en el POST manual de admin.
+ */
+export function toSseNotificationPayload(source: SseNotificationSource): NotificationEventPayload {
+  const createdAt = source.createdAt ? new Date(source.createdAt) : new Date();
+  const validCreatedAt = Number.isNaN(createdAt.getTime()) ? new Date() : createdAt;
+
+  return {
+    id: String(source.id),
+    title: source.title,
+    message: source.message,
+    createdAt: validCreatedAt.toISOString(),
+    targetRole: source.targetRole,
+    ...(source.orderId ? { orderId: String(source.orderId) } : {}),
+  };
+}
+
+/** Estado del usuario que la conexión revalida en cada heartbeat. */
+export interface SseSessionState {
+  active: boolean;
+  sessionVersion: number;
+  inbox: SseInbox;
 }
 
 export interface CreateEventStreamOptions {
@@ -39,6 +79,14 @@ export interface CreateEventStreamOptions {
   ip?: string;
   /** Último evento recibido por EventSource antes de reconectar. */
   lastEventId?: string | null;
+  /** Versión firmada al abrir la conexión; el heartbeat la compara. */
+  sessionVersion?: number;
+  /**
+   * Revalida el usuario cada SSE_HEARTBEAT_MS. Si devuelve `null` (usuario
+   * eliminado/inactivo), la versión cambió o la bandeja ya no corresponde al
+   * rol actual, la conexión se cierra con `session-expired`.
+   */
+  verifySession?: () => Promise<SseSessionState | null>;
 }
 
 interface SseConnection {
@@ -47,8 +95,10 @@ interface SseConnection {
   username: string;
   inbox: SseInbox;
   ip: string;
+  sessionVersion?: number;
+  verifySession?: () => Promise<SseSessionState | null>;
   connectedAt: number;
-  close: (reason?: 'limit' | 'send-failed' | 'closed') => void;
+  close: (reason?: 'limit' | 'session-expired' | 'send-failed' | 'closed') => void;
 }
 
 interface SseHistoryEntry {
@@ -110,6 +160,22 @@ function encodeEvent(event: SseEvent): string {
 }
 
 /**
+ * Quita la carga útil de una conexión que no es la bandeja destinataria. El
+ * evento sigue llegando (p. ej. al admin global) para que refresque su vista,
+ * pero sin el contenido completo de una alerta ajena.
+ */
+function eventForInbox(event: SseEvent, inbox: SseInbox): SseEvent {
+  if (!event.notification || inbox === event.targetRole) return event;
+  return { ...event, notification: undefined };
+}
+
+/** Variante sin carga útil, para las conexiones que no son la destinataria. */
+function eventWithoutNotification(event: SseEvent): SseEvent {
+  if (!event.notification) return event;
+  return { ...event, notification: undefined };
+}
+
+/**
  * ¿La conexión debe recibir este evento?
  *
  * Las alertas privadas de vendedor solo llegan a las conexiones de ese usuario
@@ -160,7 +226,7 @@ function replayMissedEvents(connection: SseConnection, lastEventId: string): voi
 
   for (const entry of history.slice(index + 1)) {
     if (!eventMatchesConnection(connection, entry.event)) continue;
-    if (!send(connection, encodeEvent(entry.event))) return;
+    if (!send(connection, encodeEvent(eventForInbox(entry.event, connection.inbox)))) return;
   }
 }
 
@@ -209,9 +275,15 @@ export function broadcastEvent(
 
   rememberEvent(event);
 
-  const chunk = encodeEvent(event);
+  // Dos serializaciones por broadcast: la completa (bandeja destinataria) y
+  // la liviana (admin/global y cualquier conexión que solo necesita refrescar).
+  const fullChunk = encodeEvent(event);
+  const lightChunk = event.notification ? encodeEvent(eventWithoutNotification(event)) : fullChunk;
+
   for (const connection of [...clients]) {
     if (!eventMatchesConnection(connection, event)) continue;
+    const chunk =
+      event.notification && connection.inbox !== event.targetRole ? lightChunk : fullChunk;
     send(connection, chunk);
   }
 
@@ -230,11 +302,14 @@ export function createEventStream(options: CreateEventStreamOptions): ReadableSt
   const inbox = options.inbox;
   const ip = options.ip?.trim() || SSE_UNKNOWN_IP;
   const lastEventId = options.lastEventId?.trim() || null;
+  const sessionVersion = options.sessionVersion;
+  const verifySession = options.verifySession;
 
   let controllerRef: ReadableStreamDefaultController<Uint8Array> | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let connection: SseConnection | undefined;
   let closed = false;
+  let checkingSession = false;
 
   const cleanup = () => {
     if (closed) return;
@@ -244,18 +319,19 @@ export function createEventStream(options: CreateEventStreamOptions): ReadableSt
     heartbeat = undefined;
   };
 
-  const close = (reason: 'limit' | 'send-failed' | 'closed' = 'closed') => {
+  const close = (reason: 'limit' | 'session-expired' | 'send-failed' | 'closed' = 'closed') => {
     if (closed) return;
 
-    if (reason === 'limit' && controllerRef) {
+    if ((reason === 'limit' || reason === 'session-expired') && controllerRef) {
       // Un evento con nombre permite que el cliente desista de reconectar y
       // use el polling de seguridad, en vez de entrar en una guerra de
-      // reconexiones entre pestañas que se desalojan mutuamente.
+      // reconexiones entre pestañas que se desalojan mutuamente. En
+      // `session-expired` el cliente debe volver al login: la cookie firmada
+      // ya no representa al usuario/rol actual.
+      const eventName = reason === 'limit' ? 'connection-limit' : 'session-expired';
       try {
         controllerRef.enqueue(
-          encoder.encode(
-            'retry: 30000\nevent: connection-limit\ndata: {"reason":"connection-limit"}\n\n',
-          ),
+          encoder.encode(`retry: 30000\nevent: ${eventName}\ndata: {"reason":"${eventName}"}\n\n`),
         );
       } catch {
         // La conexión ya estaba cerrada.
@@ -271,6 +347,43 @@ export function createEventStream(options: CreateEventStreamOptions): ReadableSt
     cleanup();
   };
 
+  /**
+   * Keep-alive + revocación: cada SSE_HEARTBEAT_MS se revalida el usuario.
+   * La consulta la resuelve el caller con la caché compartida de sesión, así
+   * que una baja, un reset o un cambio de rol cierran la conexión a los 25 s
+   * como máximo. Si la revalidación falla por un error transitorio, se deja la
+   * conexión abierta y se reintenta en el próximo heartbeat.
+   */
+  const heartbeatTick = async () => {
+    if (closed || !connection) return;
+
+    if (verifySession && !checkingSession) {
+      checkingSession = true;
+      try {
+        const state = await verifySession();
+        if (closed || !connection) return;
+
+        const versionChanged =
+          typeof sessionVersion === 'number' && state?.sessionVersion !== sessionVersion;
+        const inboxChanged = state?.inbox !== connection.inbox;
+
+        if (!state || !state.active || versionChanged || inboxChanged) {
+          close('session-expired');
+          return;
+        }
+      } catch {
+        // Error transitorio (Mongo, red): el próximo heartbeat reintenta.
+        return;
+      } finally {
+        checkingSession = false;
+      }
+    }
+
+    if (!send(connection, ': ping\n\n')) {
+      cleanup();
+    }
+  };
+
   return new ReadableStream<Uint8Array>({
     start(controller) {
       controllerRef = controller;
@@ -280,6 +393,8 @@ export function createEventStream(options: CreateEventStreamOptions): ReadableSt
         username,
         inbox,
         ip,
+        sessionVersion,
+        verifySession,
         connectedAt: Date.now(),
         close,
       };
@@ -293,11 +408,8 @@ export function createEventStream(options: CreateEventStreamOptions): ReadableSt
         replayMissedEvents(connection, lastEventId);
       }
 
-      // Keep-alive: mantiene viva la conexión ante proxies y detecta caídas.
       heartbeat = setInterval(() => {
-        if (connection && !send(connection, ': ping\n\n')) {
-          cleanup();
-        }
+        void heartbeatTick();
       }, SSE_HEARTBEAT_MS);
     },
     cancel() {

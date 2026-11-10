@@ -1,6 +1,6 @@
 import { Suspense } from 'react';
 import OrderDetailSkeleton from '@/components/orders/OrderDetailSkeleton';
-import { requireRolePage } from '@/lib/auth-page';
+import { requireCurrentRolePage } from '@/lib/auth-page';
 import { initialOrderErrorForStatus } from '@/lib/order-initial-data';
 import { getOrderForSession } from '@/lib/services/order-read';
 import DepositOrderVerifyClient from './DepositOrderVerifyClient';
@@ -20,7 +20,7 @@ export default function DepositOrderPage({ params }: { params: Promise<{ id: str
 }
 
 async function DepositOrderContent({ params }: { params: Promise<{ id: string }> }) {
-  const session = await requireRolePage(['admin', 'controlador']);
+  const session = await requireCurrentRolePage(['admin', 'controlador']);
   const { id } = await params;
   const result = await getOrderForSession(session, id);
   const fetchedAt = result.ok ? result.fetchedAt : undefined;

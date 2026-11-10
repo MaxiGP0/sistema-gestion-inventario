@@ -23,12 +23,13 @@ export const MAX_ORDER_PAGE_SIZE = 500;
 
 /**
  * Proyección liviana de las tarjetas: cliente, vendedor, totales, contexto
- * comercial y los snapshots de cada línea necesarios para adelantar productos
- * y faltantes. No se puebla `items.productId` ni se traen marcas o precios de
- * línea: eso queda exclusivamente en el detalle.
+ * comercial y los snapshots de cada línea necesarios para adelantar productos,
+ * detectar faltantes y repetir el pedido sin un segundo GET. `items.productId`
+ * viaja como referencia escalar (sin populate): no trae marcas ni precios de
+ * línea, eso queda exclusivamente en el detalle.
  */
 export const ORDER_LIST_SELECT =
-  'clientId clientName clientCode status finalTotal createdBy createdAt archived version invoiceType paymentCondition items._id items.productName items.productCode items.requestedQuantity items.verifiedQuantity items.isPending items.pendingReason comments';
+  'clientId clientName clientCode status finalTotal createdBy createdAt archived version invoiceType paymentCondition paymentConditionDetail items._id items.productId items.productName items.productCode items.requestedQuantity items.verifiedQuantity items.isPending items.pendingReason comments';
 
 /**
  * La tarjeta sólo muestra el último comentario. `$slice: -1` evita enviar el

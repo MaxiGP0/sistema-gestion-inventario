@@ -8,6 +8,9 @@
  * Además de clientes, productos y marcas incluye pedidos: `searchTokens` cubre
  * cliente, vendedor, código corto e ítems, y `shortId` se completa desde `_id`
  * para que los pedidos históricos también se encuentren por `#xxxxxx`.
+ *
+ * Los productos reciben además los tokens del nombre de su marca, resuelto con
+ * un mapa `_id -> name` cargado antes de recorrer la colección.
  */
 
 import type { Model } from 'mongoose';
@@ -50,12 +53,17 @@ function buildOrderMigrationFields(document: SearchDocument): SearchFieldValues 
   };
 }
 
+export interface SearchMigrationContext {
+  /** `_id` de marca -> nombre, para incluir la marca en Product.searchTokens. */
+  brandNames?: ReadonlyMap<string, string>;
+}
+
 export interface CollectionSearchMigration {
   label: string;
   model: Model<any>;
   sourceFields: readonly string[];
   searchFields: readonly string[];
-  compute: (document: SearchDocument) => SearchFieldValues;
+  compute: (document: SearchDocument, context: SearchMigrationContext) => SearchFieldValues;
 }
 
 export const SEARCH_MIGRATIONS: readonly CollectionSearchMigration[] = [
@@ -83,9 +91,15 @@ export const SEARCH_MIGRATIONS: readonly CollectionSearchMigration[] = [
   {
     label: 'products',
     model: Product,
-    sourceFields: ['code', 'name'],
+    sourceFields: ['code', 'name', 'brandId'],
     searchFields: ['searchName', 'searchCode', 'searchTokens'],
-    compute: buildProductSearchFields,
+    compute: (document, context) =>
+      buildProductSearchFields({
+        code: document.code,
+        name: document.name,
+        brandId: document.brandId,
+        brandName: context.brandNames?.get(String(document.brandId)),
+      }),
   },
   {
     label: 'orders',
@@ -117,6 +131,25 @@ export interface BackfillOptions {
   onCollection?: (report: BackfillReport) => void;
 }
 
+/** Mapa liviano de marcas para no consultar `Brand` por cada producto. */
+async function loadBrandNames(
+  migrations: readonly CollectionSearchMigration[],
+): Promise<Map<string, string>> {
+  const brandNames = new Map<string, string>();
+  if (!migrations.some((migration) => migration.label === 'products')) return brandNames;
+
+  const brands = (await Brand.find({}, { name: 1 }).lean()) as unknown as Array<{
+    _id: unknown;
+    name?: string;
+  }>;
+
+  for (const brand of brands) {
+    if (brand.name) brandNames.set(String(brand._id), String(brand.name));
+  }
+
+  return brandNames;
+}
+
 export async function backfillSearchFields({
   dryRun = false,
   batchSize = 500,
@@ -124,6 +157,9 @@ export async function backfillSearchFields({
   onCollection,
 }: BackfillOptions = {}): Promise<BackfillReport[]> {
   const reports: BackfillReport[] = [];
+  const context: SearchMigrationContext = {
+    brandNames: await loadBrandNames(migrations),
+  };
 
   for (const migration of migrations) {
     const { label, model, sourceFields, searchFields, compute } = migration;
@@ -145,7 +181,7 @@ export async function backfillSearchFields({
 
     for await (const document of cursor as AsyncIterable<SearchDocument>) {
       scanned += 1;
-      const fields = compute(document);
+      const fields = compute(document, context);
       const needsUpdate = Object.entries(fields).some(
         ([key, value]) => !searchValueMatches(document[key], value),
       );

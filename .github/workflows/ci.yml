@@ -115,7 +115,10 @@ jobs:
           name: lighthouse-report
           path: .lighthouseci
           retention-days: 7
-          if-no-files-found: ignore
+          # `.lighthouseci` empieza con punto: sin esto upload-artifact lo omite
+          # y el run termina sin reportes para diagnosticar.
+          include-hidden-files: true
+          if-no-files-found: warn
 
       - name: Performance móvil Playwright
         run: npm run perf:playwright:run
@@ -133,7 +136,9 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # La suite completa (Chromium + dos perfiles móviles + PWA) ronda los
+    # 29 minutos. 45 deja margen para un reintento sin cortar el job.
+    timeout-minutes: 45
     needs: checks
 
     steps:

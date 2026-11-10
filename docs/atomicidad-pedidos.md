@@ -53,7 +53,7 @@ Las transacciones multi-documento requieren un **replica set** (o un cluster
 sharded). Un `mongod` local arrancado en modo standalone no las soporta.
 
 El despliegue de este repositorio no está fijado a un replica set: el README
-admite tanto un MongoDB local (`mongodb://127.0.0.1:27017/sistema-gestion-inventario`) como Atlas.
+admite tanto un MongoDB local (`mongodb://127.0.0.1:27017/sgi`) como Atlas.
 Por eso **no se agregó una transacción** alrededor de `order.save()` +
 `Notification.create()`: en el caso local standalone fallaría con
 `Transaction numbers are only allowed on a replica set member or mongos`.

@@ -1,6 +1,6 @@
 # Backup, restore y retención de MongoDB
 
-Este runbook cubre cómo respaldar y restaurar la base de Sistema de Gestión de Inventario, cómo verificar
+Este runbook cubre cómo respaldar y restaurar la base del Sistema de Gestión de Inventario, cómo verificar
 una restauración y qué retención aplicar. Aplica a MongoDB local y a MongoDB
 Atlas; para producción se recomienda **Atlas con backup continuo/PITR** y,
 además, un backup lógico periódico con `mongodump` para exportación y pruebas de
@@ -52,7 +52,7 @@ Atlas.
 ```bash
 set -euo pipefail
 
-BACKUP_DIR="${BACKUP_DIR:-/var/backups/inventario}"
+BACKUP_DIR="${BACKUP_DIR:-/var/backups/sgi}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$BACKUP_DIR"
 
@@ -60,10 +60,10 @@ mkdir -p "$BACKUP_DIR"
 mongodump \
   --uri="$MONGODB_URI" \
   --gzip \
-  --archive="$BACKUP_DIR/inventario-$STAMP.archive.gz"
+  --archive="$BACKUP_DIR/sgi-$STAMP.archive.gz"
 
 # Verificación básica de que el archivo existe y no está vacío.
-test -s "$BACKUP_DIR/inventario-$STAMP.archive.gz"
+test -s "$BACKUP_DIR/sgi-$STAMP.archive.gz"
 ```
 
 Para una copia consistente en un replica set (Atlas lo es), agregar el oplog:
@@ -73,7 +73,7 @@ mongodump \
   --uri="$MONGODB_URI" \
   --gzip \
   --oplog \
-  --archive="$BACKUP_DIR/inventario-$STAMP-oplog.archive.gz"
+  --archive="$BACKUP_DIR/sgi-$STAMP-oplog.archive.gz"
 ```
 
 `--oplog` requiere un replica set. En un standalone, detener las escrituras de
@@ -83,12 +83,12 @@ la app durante el dump o aceptar una copia no transaccional.
 
 ```powershell
 $ErrorActionPreference = "Stop"
-$backupDir = "D:\backups\inventario"
+$backupDir = "D:\backups\sgi"
 $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
 New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
 
-mongodump --uri="$env:MONGODB_URI" --gzip --archive="$backupDir\inventario-$stamp.archive.gz"
-if (-not (Test-Path "$backupDir\inventario-$stamp.archive.gz")) { throw "Backup vacío" }
+mongodump --uri="$env:MONGODB_URI" --gzip --archive="$backupDir\sgi-$stamp.archive.gz"
+if (-not (Test-Path "$backupDir\sgi-$stamp.archive.gz")) { throw "Backup vacío" }
 ```
 
 ### 3.3 Cifrado y destino externo
@@ -96,12 +96,12 @@ if (-not (Test-Path "$backupDir\inventario-$stamp.archive.gz")) { throw "Backup 
 ```bash
 # Cifrar con age (la clave pública va en el secret manager)
 age -r "$AGE_RECIPIENT" \
-  -o "$BACKUP_DIR/inventario-$STAMP.archive.gz.age" \
-  "$BACKUP_DIR/inventario-$STAMP.archive.gz"
+  -o "$BACKUP_DIR/sgi-$STAMP.archive.gz.age" \
+  "$BACKUP_DIR/sgi-$STAMP.archive.gz"
 
 # Subir al bucket con versionado. El comando depende del proveedor (aws s3, gcloud, az).
-aws s3 cp "$BACKUP_DIR/inventario-$STAMP.archive.gz.age" \
-  "s3://inventario-backups/mongo/$(date -u +%Y/%m)/"
+aws s3 cp "$BACKUP_DIR/sgi-$STAMP.archive.gz.age" \
+  "s3://sgi-backups/mongo/$(date -u +%Y/%m)/"
 ```
 
 Buenas prácticas:
@@ -115,10 +115,10 @@ Buenas prácticas:
 ### 3.4 Programación
 
 Linux (crontab), todos los días a las 02:30 UTC. Guardar el bloque de la sección
-3.1 como `/usr/local/bin/inventario-backup.sh` (con permisos 700) y programarlo:
+3.1 como `/usr/local/bin/sgi-backup.sh` (con permisos 700) y programarlo:
 
 ```cron
-30 2 * * * /usr/bin/flock -n /tmp/inventario-backup.lock /usr/local/bin/inventario-backup.sh >> /var/log/inventario-backup.log 2>&1
+30 2 * * * /usr/bin/flock -n /tmp/sgi-backup.lock /usr/local/bin/sgi-backup.sh >> /var/log/sgi-backup.log 2>&1
 ```
 
 Windows (Programador de tareas): ejecutar el bloque de PowerShell anterior con
@@ -140,20 +140,20 @@ Nunca restaurar directamente sobre producción para “probar”. Usar otra base
 
 ```bash
 STAMP="20261024T023000Z"
-ARCHIVE="/var/backups/inventario/inventario-$STAMP.archive.gz"
+ARCHIVE="/var/backups/sgi/sgi-$STAMP.archive.gz"
 
 mongorestore \
   --uri="$MONGODB_URI" \
   --gzip \
   --archive="$ARCHIVE" \
-  --nsFrom='inventario.*' \
-  --nsTo='inventario_restore.*'
+  --nsFrom='sgi.*' \
+  --nsTo='sgi_restore.*'
 ```
 
 Verificar:
 
 ```bash
-mongosh "$MONGODB_URI/inventario_restore" --eval '
+mongosh "$MONGODB_URI/sgi_restore" --eval '
   printjson({
     orders: db.orders.countDocuments(),
     clients: db.clients.countDocuments(),
@@ -166,11 +166,11 @@ mongosh "$MONGODB_URI/inventario_restore" --eval '
 ```
 
 Comparar con producción (solo conteos, sin exportar documentos) y probar la app
-apuntando `MONGODB_URI` a `inventario_restore` en un entorno de staging. Si todo
+apuntando `MONGODB_URI` a `sgi_restore` en un entorno de staging. Si todo
 está bien, borrar la base temporal:
 
 ```bash
-mongosh "$MONGODB_URI/inventario_restore" --eval 'db.dropDatabase()'
+mongosh "$MONGODB_URI/sgi_restore" --eval 'db.dropDatabase()'
 ```
 
 ### 4.2 Restauración completa con ventana de mantenimiento
@@ -188,7 +188,7 @@ mongorestore \
   --gzip \
   --archive="$ARCHIVE" \
   --drop \
-  --nsInclude='inventario.*'
+  --nsInclude='sgi.*'
 ```
 
 `--drop` elimina las colecciones que también están en el dump antes de
@@ -198,7 +198,7 @@ estado exacto, evaluar `db.dropDatabase()` **después** de un backup verificado.
 5. Revisar índices y TTL:
 
 ```bash
-mongosh "$MONGODB_URI/inventario" --eval '
+mongosh "$MONGODB_URI/sgi" --eval '
   printjson(db.notifications.getIndexes());
   printjson(db.orders.getIndexes());
 '
@@ -244,11 +244,11 @@ mongorestore \
   --uri="$MONGODB_URI" \
   --gzip \
   --archive="$ARCHIVE" \
-  --nsFrom='inventario.orders' \
-  --nsTo='inventario_restore.orders'
+  --nsFrom='sgi.orders' \
+  --nsTo='sgi_restore.orders'
 
 # Copiar los documentos necesarios con mongosh, con un filtro acotado y
-# verificando antes en inventario_restore. No hacer un replace masivo sin backup.
+# verificando antes en sgi_restore. No hacer un replace masivo sin backup.
 ```
 
 ## 5. Retención

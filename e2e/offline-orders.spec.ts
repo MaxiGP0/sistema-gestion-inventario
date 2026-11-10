@@ -1,6 +1,14 @@
 import { expect, test } from '@playwright/test';
 import { E2E_CLIENTS, E2E_PRODUCTS, E2E_USERS } from './fixtures';
-import { clientIdByCode, createOrder, fillOrderForm, loginAs, ordersForClient } from './helpers';
+import {
+  clientIdByCode,
+  createOrder,
+  fillOrderForm,
+  loginAs,
+  ordersForClient,
+  waitForOfflineSyncReady,
+  waitForReactHydration,
+} from './helpers';
 
 test.describe('Alta de pedidos offline', () => {
   test('guarda el pedido sin conexión y lo sincroniza una sola vez al volver online', async ({
@@ -166,6 +174,10 @@ test.describe('Alta de pedidos offline', () => {
     await expect(
       page.getByRole('heading', { name: 'Listado de Productos a Controlar' }),
     ).toBeVisible();
+    // El indicador global se carga en un chunk aparte después de hidratar.
+    // Si se corta la red antes, el import falla y la cola no se puede abrir.
+    await waitForReactHydration(page, '[data-testid="deposit-action-bar"]');
+    await waitForOfflineSyncReady(page);
 
     await context.setOffline(true);
     await expect.poll(() => page.evaluate(() => navigator.onLine)).toBe(false);

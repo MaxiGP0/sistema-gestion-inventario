@@ -5,7 +5,9 @@
  *   resolviendo cuando se piden explícitamente por ids (restauración de
  *   borradores/pedidos históricos).
  * - POST /api/products reactiva el producto si se vuelve a dar de alta.
- * - DELETE /api/brands/[id] bloquea si hay clientes con descuentos de la marca.
+ * - DELETE /api/brands/[id] bloquea si hay productos activos o clientes con
+ *   descuentos de la marca, pero permite la baja si sus productos quedaron
+ *   inactivos.
  *
  * No requiere base de datos: se deja una conexión mongoose cacheada falsa y se
  * stubbean los statics de Product/Brand/Client antes de importar los handlers.
@@ -38,7 +40,8 @@ let productDeleteCalls: { id: string; update: Record<string, unknown> }[] = [];
 let hardDeleteCalls = 0;
 let catalogQueries: Record<string, unknown>[] = [];
 let productUpsert: any = null;
-let productCount = 0;
+let activeProductCount = 0;
+let productCountQueries: Record<string, unknown>[] = [];
 let clientDiscountCount = 0;
 let clientDiscountQueries: Record<string, unknown>[] = [];
 let brandDeleteCalls = 0;
@@ -77,7 +80,10 @@ before(async () => {
     catalogQueries.push(query);
     return productQuery();
   });
-  mock.method(Product as any, 'countDocuments', async () => productCount);
+  mock.method(Product as any, 'countDocuments', async (query: Record<string, unknown>) => {
+    productCountQueries.push(query);
+    return query.active ? activeProductCount : 0;
+  });
   mock.method(
     Product as any,
     'findOneAndUpdate',
@@ -196,8 +202,9 @@ test('POST /api/products reactiva un producto existente dado de baja', async () 
 });
 
 test('DELETE /api/brands/[id] bloquea si clientes usan la marca en sus descuentos', async () => {
-  productCount = 0;
+  activeProductCount = 0;
   clientDiscountCount = 2;
+  productCountQueries = [];
   clientDiscountQueries = [];
   brandDeleteCalls = 0;
   const id = oid().toString();
@@ -210,23 +217,43 @@ test('DELETE /api/brands/[id] bloquea si clientes usan la marca en sus descuento
 
   assert.equal(response.status, 400);
   assert.match(payload.error, /2 cliente\(s\)/);
+  assert.deepEqual(productCountQueries, [{ brandId: id, active: { $ne: false } }]);
   assert.deepEqual(clientDiscountQueries, [{ 'brandDiscounts.brandId': id }]);
   assert.equal(brandDeleteCalls, 0, 'no debe borrar la marca referenciada');
 });
 
-test('DELETE /api/brands/[id] elimina la marca si no hay productos ni descuentos que la usen', async () => {
-  productCount = 0;
+test('DELETE /api/brands/[id] permite la baja cuando sus productos quedaron inactivos', async () => {
   clientDiscountCount = 0;
+  productCountQueries = [];
   brandDeleteCalls = 0;
   const id = oid().toString();
 
-  const response = await brandDelete(
+  // Mientras quede un producto activo, la marca no se puede eliminar.
+  activeProductCount = 2;
+  const blockedResponse = await brandDelete(
     authRequest(`http://localhost/api/brands/${id}`, { method: 'DELETE' }),
     { params: Promise.resolve({ id }) },
   );
-  const payload = await response.json();
+  const blockedPayload = await blockedResponse.json();
 
-  assert.equal(response.status, 200);
-  assert.equal(payload.success, true);
+  assert.equal(blockedResponse.status, 400);
+  assert.match(blockedPayload.error, /2 productos asociados/);
+  assert.equal(brandDeleteCalls, 0, 'no debe borrar la marca con productos activos');
+
+  // DELETE /api/products/[id] deja los productos en active: false: ya no
+  // bloquean la baja de la marca.
+  activeProductCount = 0;
+  const allowedResponse = await brandDelete(
+    authRequest(`http://localhost/api/brands/${id}`, { method: 'DELETE' }),
+    { params: Promise.resolve({ id }) },
+  );
+  const allowedPayload = await allowedResponse.json();
+
+  assert.equal(allowedResponse.status, 200);
+  assert.equal(allowedPayload.success, true);
   assert.equal(brandDeleteCalls, 1);
+  assert.deepEqual(productCountQueries, [
+    { brandId: id, active: { $ne: false } },
+    { brandId: id, active: { $ne: false } },
+  ]);
 });

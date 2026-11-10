@@ -32,7 +32,9 @@ import {
 } from '../lib/search-query';
 import { buildOrderListQuery } from '../lib/order-query';
 import { orderShortId } from '../lib/order-short-id';
-import { backfillSearchFields } from '../lib/search-backfill';
+import { backfillSearchFields, SEARCH_MIGRATIONS } from '../lib/search-backfill';
+import { PUT as updateBrand } from '../app/api/brands/[id]/route';
+import { authRequest } from './test-auth-utils';
 
 let mongo: MongoMemoryServer;
 
@@ -65,7 +67,7 @@ after(async () => {
 
 test('normaliza mayúsculas, acentos y tokens', () => {
   assert.equal(normalizeSearchText('  GÓMEZ   Núñez  '), 'gomez nunez');
-  assert.equal(normalizeSearchText('Bagó'), 'bago');
+  assert.equal(normalizeSearchText('DermaPlus'), 'dermaplus');
   assert.deepEqual(tokenizeSearchText('Cliente Núñez', 'C-Ñ1'), ['cliente', 'nunez', 'c', 'n1']);
 });
 
@@ -79,13 +81,13 @@ test('buildOrderSearchFields combina cliente, vendedor, código corto e ítems',
       items: [
         {
           productCode: 'SH-400',
-          productName: 'Shampoo Capitalis 400ml',
-          brandName: 'Bagó',
+          productName: 'Shampoo NovaFarma 400ml',
+          brandName: 'DermaPlus',
         },
         {
           productCode: 'AC-200',
           productName: 'Acondicionador',
-          brandName: 'Bagó',
+          brandName: 'DermaPlus',
         },
       ],
     }),
@@ -101,9 +103,9 @@ test('buildOrderSearchFields combina cliente, vendedor, código corto e ítems',
         'sh',
         '400',
         'shampoo',
-        'capitalis',
+        'novafarma',
         '400ml',
-        'bago',
+        'dermaplus',
         'ac',
         '200',
         'acondicionador',
@@ -113,14 +115,15 @@ test('buildOrderSearchFields combina cliente, vendedor, código corto e ítems',
 
   // Tokens repetidos entre cliente e ítems no se duplican.
   assert.deepEqual(
-    buildOrderSearchFields({ clientName: 'Bagó', items: [{ brandName: 'BAGÓ' }] }).searchTokens,
-    ['bago'],
+    buildOrderSearchFields({ clientName: 'DermaPlus', items: [{ brandName: 'DERMÁPLUS' }] })
+      .searchTokens,
+    ['dermaplus'],
   );
 });
 
 test('los hooks completan las claves al guardar y al actualizar', async () => {
-  const brand = await Brand.create({ name: 'Bagó' });
-  assert.equal(brand.searchName, 'bago');
+  const brand = await Brand.create({ name: 'DermaPlus' });
+  assert.equal(brand.searchName, 'dermaplus');
 
   const client = await Client.create({
     code: 'C-Ñ1',
@@ -160,13 +163,13 @@ test('los hooks completan las claves al guardar y al actualizar', async () => {
   const product = await Product.create({
     brandId: brand._id,
     code: 'Ñ-10',
-    name: 'Yerba Bagó',
+    name: 'Yerba DermaPlus',
     price: 100,
   });
   assert.deepEqual(buildProductSearchFields(product), {
-    searchName: 'yerba bago',
+    searchName: 'yerba dermaplus',
     searchCode: 'n-10',
-    searchTokens: ['n', '10', 'yerba', 'bago'],
+    searchTokens: ['n', '10', 'yerba', 'dermaplus'],
   });
 });
 
@@ -175,8 +178,8 @@ test('Order sincroniza shortId y searchTokens al crear e insertar en lote', asyn
   const item = {
     productId,
     productCode: 'SH-400',
-    productName: 'Shampoo Capitalis 400ml',
-    brandName: 'Bagó',
+    productName: 'Shampoo NovaFarma 400ml',
+    brandName: 'DermaPlus',
     unitPrice: 100,
     requestedQuantity: 2,
     verifiedQuantity: 0,
@@ -205,9 +208,9 @@ test('Order sincroniza shortId y searchTokens al crear e insertar en lote', asyn
     'sh',
     '400',
     'shampoo',
-    'capitalis',
+    'novafarma',
     '400ml',
-    'bago',
+    'dermaplus',
   ]);
 
   const [inserted] = await Order.insertMany([
@@ -255,8 +258,8 @@ test('el backfill es idempotente y sólo completa documentos históricos', async
         {
           productId: new mongoose.Types.ObjectId(),
           productCode: 'SH-400',
-          productName: 'Shampoo Capitalis',
-          brandName: 'Bagó',
+          productName: 'Shampoo NovaFarma',
+          brandName: 'DermaPlus',
         },
       ],
       subtotal: 0,
@@ -289,7 +292,7 @@ test('el backfill es idempotente y sólo completa documentos históricos', async
   assert.equal(order?.shortId, orderShortId(legacyOrderId));
   assert.ok(order?.searchTokens.includes('historico'));
   assert.ok(order?.searchTokens.includes('shampoo'));
-  assert.ok(order?.searchTokens.includes('bago'));
+  assert.ok(order?.searchTokens.includes('dermaplus'));
 
   const second = await backfillSearchFields({ batchSize: 1 });
   assert.ok(
@@ -306,7 +309,7 @@ test('el backfill es idempotente y sólo completa documentos históricos', async
 });
 
 test('la búsqueda multi-token encuentra palabras en cualquier posición', async () => {
-  const brand = await Brand.create({ name: 'Capitalis' });
+  const brand = await Brand.create({ name: 'NovaFarma' });
   await Client.create({
     code: 'C-AHORRO',
     name: 'Supermercado El Ahorro',
@@ -324,13 +327,13 @@ test('la búsqueda multi-token encuentra palabras en cualquier posición', async
   await Product.create({
     brandId: brand._id,
     code: 'SH-400',
-    name: 'Shampoo Capitalis 400ml',
+    name: 'Shampoo NovaFarma 400ml',
     price: 100,
   });
   await Product.create({
     brandId: brand._id,
     code: 'SH-200',
-    name: 'Shampoo Capitalis 200ml',
+    name: 'Shampoo NovaFarma 200ml',
     price: 100,
   });
 
@@ -352,12 +355,152 @@ test('la búsqueda multi-token encuentra palabras en cualquier posición', async
     'Supermercado El Ahorro',
   ]);
   assert.deepEqual(await productNames(buildProductSearchFilter('shampoo 400')), [
-    'Shampoo Capitalis 400ml',
+    'Shampoo NovaFarma 400ml',
   ]);
-  assert.deepEqual(await productNames(buildProductSearchFilter('capitalis')), [
-    'Shampoo Capitalis 200ml',
-    'Shampoo Capitalis 400ml',
+  assert.deepEqual(await productNames(buildProductSearchFilter('novafarma')), [
+    'Shampoo NovaFarma 200ml',
+    'Shampoo NovaFarma 400ml',
   ]);
+});
+
+test('el nombre de la marca se indexa y se encuentra en cualquier orden', async () => {
+  const brand = await Brand.create({ name: 'BioSalud' });
+  const created = await Product.create({
+    brandId: brand._id,
+    code: 'JAB-400',
+    name: 'Jabón Líquido 400ml',
+    price: 100,
+  });
+  await Product.create({
+    brandId: brand._id,
+    code: 'JAB-200',
+    name: 'Jabón Líquido 200ml',
+    price: 100,
+  });
+
+  assert.ok(
+    created.searchTokens.includes('biosalud'),
+    'Product.create resuelve el nombre de la marca para searchTokens',
+  );
+
+  const matchingBrands = (await Brand.find(buildBrandSearchFilter('biosalud 400')!)
+    .select('_id name')
+    .lean()) as unknown as Array<{ _id: unknown; name: string }>;
+  assert.deepEqual(
+    matchingBrands.map((item) => item.name),
+    ['BioSalud'],
+    'la marca se resuelve por cualquiera de los tokens',
+  );
+
+  const productNames = async (filter: Record<string, unknown> | null) =>
+    (
+      await Product.find(filter ?? {})
+        .sort({ name: -1 })
+        .lean()
+    ).map((product) => product.name);
+
+  const expectedByTerm: Record<string, string[]> = {
+    'biosalud jabon': ['Jabón Líquido 400ml', 'Jabón Líquido 200ml'],
+    'biosalud 400': ['Jabón Líquido 400ml'],
+    'jabon biosalud': ['Jabón Líquido 400ml', 'Jabón Líquido 200ml'],
+    '400 biosalud': ['Jabón Líquido 400ml'],
+  };
+
+  for (const [term, expected] of Object.entries(expectedByTerm)) {
+    assert.deepEqual(
+      await productNames(buildProductSearchFilter(term, matchingBrands)),
+      expected,
+      `la marca debe resolver "${term}"`,
+    );
+    assert.deepEqual(
+      await productNames(buildProductSearchFilter(term)),
+      expected,
+      `los documentos migrados no deben depender de Brand.find para "${term}"`,
+    );
+  }
+
+  assert.deepEqual(await productNames(buildProductSearchFilter('biosalud')), [
+    'Jabón Líquido 400ml',
+    'Jabón Líquido 200ml',
+  ]);
+});
+
+test('PUT /api/brands/[id] renombra la marca y actualiza searchTokens/updatedAt de sus productos', async () => {
+  const brand = await Brand.create({ name: 'BioSalud' });
+  const product = await Product.create({
+    brandId: brand._id,
+    code: 'JAB-400',
+    name: 'Jabón Líquido 400ml',
+    price: 100,
+  });
+  const previousUpdatedAt = product.updatedAt;
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  const response = await updateBrand(
+    authRequest(`http://localhost/api/brands/${brand._id}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Nueva Marca', codePrefix: 'NM' }),
+    }),
+    { params: Promise.resolve({ id: String(brand._id) }) },
+  );
+
+  assert.equal(response.status, 200);
+  const updated = await Product.findById(product._id).lean();
+  assert.ok(updated);
+  assert.deepEqual(updated.searchTokens, [
+    'jab',
+    '400',
+    'jabon',
+    'liquido',
+    '400ml',
+    'nueva',
+    'marca',
+  ]);
+  assert.ok(
+    updated.updatedAt.getTime() > previousUpdatedAt.getTime(),
+    'updatedAt debe avanzar para que el snapshot offline incremental reciba el cambio',
+  );
+
+  const matchingBrands = (await Brand.find(buildBrandSearchFilter('nueva jabon')!)
+    .select('_id name')
+    .lean()) as unknown as Array<{ _id: unknown; name: string }>;
+  assert.deepEqual(
+    (
+      await Product.find(buildProductSearchFilter('nueva jabon', matchingBrands) ?? {})
+        .sort({ name: 1 })
+        .lean()
+    ).map((item) => item.name),
+    ['Jabón Líquido 400ml'],
+  );
+  assert.deepEqual(
+    await Product.find(buildProductSearchFilter('biosalud jabon') ?? {}).lean(),
+    [],
+    'el token de la marca anterior no debe quedar en searchTokens',
+  );
+});
+
+test('el backfill de productos resuelve el nombre de la marca', async () => {
+  const inserted = await Brand.collection.insertMany([{ name: 'BioSalud' }]);
+  await Product.collection.insertMany([
+    {
+      brandId: inserted.insertedIds[0],
+      code: 'JAB-400',
+      name: 'Jabón Líquido 400ml',
+      price: 1,
+    },
+  ]);
+
+  const productMigration = SEARCH_MIGRATIONS.filter((migration) => migration.label === 'products');
+  const [report] = await backfillSearchFields({ migrations: productMigration });
+  assert.deepEqual(report, { label: 'products', scanned: 1, changed: 1 });
+
+  const product = await Product.findOne({ code: 'JAB-400' }).lean();
+  assert.deepEqual(product?.searchTokens, ['jab', '400', 'jabon', 'liquido', '400ml', 'biosalud']);
+
+  const [second] = await backfillSearchFields({ migrations: productMigration });
+  assert.equal(second.changed, 0, 'la segunda corrida no escribe nada');
 });
 
 test('la búsqueda de pedidos por tokens encuentra cliente, producto y código corto', async () => {
@@ -379,14 +522,14 @@ test('la búsqueda de pedidos por tokens encuentra cliente, producto y código c
     clientName: 'Supermercado El Ahorro',
     clientCode: 'CLI-1042',
     createdBy: 'vendedor-gomez',
-    items: [item('SH-400', 'Shampoo Capitalis 400ml', 'Bagó')],
+    items: [item('SH-400', 'Shampoo NovaFarma 400ml', 'DermaPlus')],
   });
   await Order.create({
     clientId: new mongoose.Types.ObjectId(),
     clientName: 'Supermercado Central',
     clientCode: 'CLI-2000',
     createdBy: 'vendedor-otro',
-    items: [item('AC-200', 'Acondicionador', 'Bagó')],
+    items: [item('AC-200', 'Acondicionador', 'DermaPlus')],
   });
 
   // Pedido histórico sin searchTokens: se resuelve por el fallback de regex.
@@ -428,9 +571,10 @@ test('la búsqueda de pedidos por tokens encuentra cliente, producto y código c
 });
 
 test('la búsqueda por prefijo no hace COLLSCAN ni en el listado ni en el count', async () => {
-  const brand = await Brand.create({ name: 'Modular Labs' });
+  const brand = await Brand.create({ name: 'Sistema de Gestión de Inventario Labs' });
   const clients = Array.from({ length: 300 }, (_, index) => {
-    const name = index % 50 === 0 ? `Modular Cliente ${index}` : `Cliente ${index}`;
+    const name =
+      index % 50 === 0 ? `Sistema de Gestión de Inventario Cliente ${index}` : `Cliente ${index}`;
     const code = index % 100 === 0 ? `MOD-${index}` : `C-${index}`;
     return {
       code,
@@ -444,7 +588,10 @@ test('la búsqueda por prefijo no hace COLLSCAN ni en el listado ni en el count'
   await Client.insertMany(clients);
   await Product.insertMany(
     Array.from({ length: 300 }, (_, index) => {
-      const name = index % 50 === 0 ? `Modular Producto ${index}` : `Producto ${index}`;
+      const name =
+        index % 50 === 0
+          ? `Sistema de Gestión de Inventario Producto ${index}`
+          : `Producto ${index}`;
       const code = index % 100 === 0 ? `MOD-${index}` : `P-${index}`;
       return {
         brandId: brand._id,
@@ -477,10 +624,10 @@ test('la búsqueda por prefijo no hace COLLSCAN ni en el listado ni en el count'
     'el listado debe usar un índice de búsqueda',
   );
 
-  const brandIds = (await Brand.find(buildBrandSearchFilter('MOD')!).select('_id').lean()).map(
-    (item) => item._id,
-  );
-  const productFilter = buildProductSearchFilter('MOD', brandIds)!;
+  const matchingBrands = (await Brand.find(buildBrandSearchFilter('MOD')!)
+    .select('_id name')
+    .lean()) as unknown as Array<{ _id: unknown; name: string }>;
+  const productFilter = buildProductSearchFilter('MOD', matchingBrands)!;
   const productCount = await mongoose.connection.db!.command({
     explain: { count: Product.collection.collectionName, query: productFilter },
     verbosity: 'executionStats',
@@ -490,7 +637,8 @@ test('la búsqueda por prefijo no hace COLLSCAN ni en el listado ni en el count'
   await Order.insertMany(
     Array.from({ length: 300 }, (_, index) => ({
       clientId: new mongoose.Types.ObjectId(),
-      clientName: index % 50 === 0 ? `Modular Cliente ${index}` : `Cliente ${index}`,
+      clientName:
+        index % 50 === 0 ? `Sistema de Gestión de Inventario Cliente ${index}` : `Cliente ${index}`,
       clientCode: index % 100 === 0 ? `MOD-${index}` : `C-${index}`,
       createdBy: 'vendedor-gomez',
       status: 'borrador',
@@ -498,8 +646,11 @@ test('la búsqueda por prefijo no hace COLLSCAN ni en el listado ni en el count'
         {
           productId: new mongoose.Types.ObjectId(),
           productCode: `P-${index}`,
-          productName: index % 50 === 0 ? `Modular Producto ${index}` : `Producto ${index}`,
-          brandName: 'Modular Labs',
+          productName:
+            index % 50 === 0
+              ? `Sistema de Gestión de Inventario Producto ${index}`
+              : `Producto ${index}`,
+          brandName: 'Sistema de Gestión de Inventario Labs',
           unitPrice: 1,
           requestedQuantity: 1,
           verifiedQuantity: 0,
@@ -536,5 +687,5 @@ test('la búsqueda por prefijo no hace COLLSCAN ni en el listado ni en el count'
 });
 
 test('buildBrandSearchFields normaliza el nombre de la marca', () => {
-  assert.deepEqual(buildBrandSearchFields({ name: '  Algabó ' }), { searchName: 'algabo' });
+  assert.deepEqual(buildBrandSearchFields({ name: '  BioSalud ' }), { searchName: 'biosalud' });
 });

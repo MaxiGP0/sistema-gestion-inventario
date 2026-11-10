@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import { Suspense } from 'react';
-import { requireRolePage } from '@/lib/auth-page';
+import { requireCurrentRolePage } from '@/lib/auth-page';
 import { PRODUCTS_PAGE_SIZE, getBrands, getProducts } from '@/lib/catalog';
 import CatalogBrowser from './CatalogBrowser';
 import CatalogPageSkeleton from './CatalogPageSkeleton';
@@ -33,7 +33,7 @@ export default function CatalogPage({ searchParams }: CatalogPageProps) {
 }
 
 async function CatalogContent({ searchParams }: CatalogPageProps) {
-  const session = await requireRolePage(['admin', 'vendedor', 'controlador']);
+  const session = await requireCurrentRolePage(['admin', 'vendedor', 'controlador']);
 
   const params = await searchParams;
   const search = firstParam(params.search).trim();

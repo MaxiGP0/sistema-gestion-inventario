@@ -60,6 +60,8 @@ interface MobileCheckoutModalProps {
   onQuantityChange: (productId: string, value: string) => void;
   onQuantityDelta: (productId: string, delta: number) => void;
   onRemoveItem: (productId: string) => void;
+  onDiscountChange: (productId: string, value: string) => void;
+  onDiscountClear: (productId: string) => void;
   subtotal: number;
   totalDiscount: number;
   finalTotal: number;
@@ -109,6 +111,8 @@ export default function MobileCheckoutModal({
   onQuantityChange,
   onQuantityDelta,
   onRemoveItem,
+  onDiscountChange,
+  onDiscountClear,
   subtotal,
   totalDiscount,
   finalTotal,
@@ -331,6 +335,8 @@ export default function MobileCheckoutModal({
             onQuantityChange={onQuantityChange}
             onQuantityDelta={onQuantityDelta}
             onRemoveItem={onRemoveItem}
+            onDiscountChange={onDiscountChange}
+            onDiscountClear={onDiscountClear}
             className="max-h-72 overflow-y-auto overscroll-contain"
           />
         </div>
@@ -353,7 +359,9 @@ export default function MobileCheckoutModal({
           </div>
           <div className="flex justify-between border-t border-border pt-2 text-base font-semibold text-foreground">
             <span>Total Final:</span>
-            <span className="tabular-nums">${finalTotal.toFixed(2)}</span>
+            <span data-testid="mobile-checkout-final-total" className="tabular-nums">
+              ${finalTotal.toFixed(2)}
+            </span>
           </div>
         </div>
       </div>

@@ -18,7 +18,13 @@ export interface OrderLineFilterItemLike {
   id?: string;
   productCode?: string;
   productName?: string;
-  productId?: { code?: string; name?: string } | null;
+  /** Snapshot de la marca al crear el pedido. */
+  brandName?: string;
+  productId?: {
+    code?: string;
+    name?: string;
+    brandId?: { name?: string } | null;
+  } | null;
 }
 
 export interface OrderLineFilterPredicates<T> {
@@ -36,11 +42,21 @@ export interface OrderLineFilterSelection {
   filter: OrderLineFilter;
   query?: string;
   /**
+   * Marca seleccionada. `undefined` y `'all'` muestran todas; cualquier otro
+   * valor filtra por el nombre de marca de la línea.
+   */
+  brandName?: string;
+  /**
    * Claves que se conservan visibles aunque ya no coincidan con el chip o la
    * búsqueda. La usa el detalle para no hacer desaparecer la tarjeta que el
    * operario está tocando (por ejemplo, al controlar una línea pendiente).
    */
   pinnedKeys?: ReadonlySet<string>;
+}
+
+export interface OrderLineBrandCount {
+  name: string;
+  count: number;
 }
 
 /** Normaliza para comparar sin distinguir mayúsculas ni acentos. */
@@ -57,6 +73,31 @@ export function orderLineSearchText(item: OrderLineFilterItemLike): string {
   const code = item.productCode ?? item.productId?.code ?? '';
   const name = item.productName ?? item.productId?.name ?? '';
   return normalizeOrderLineSearch(`${code} ${name}`);
+}
+
+/** Marca visible de una línea, con respaldo en el producto poblado. */
+export function orderLineBrandName(item: OrderLineFilterItemLike): string {
+  return (item.brandName ?? item.productId?.brandId?.name ?? '').trim();
+}
+
+/**
+ * Marcas únicas del pedido con la cantidad de líneas de cada una. Se ordenan
+ * alfabéticamente para que los chips mantengan siempre la misma posición.
+ */
+export function extractOrderLineBrands<T extends OrderLineFilterItemLike>(
+  items: readonly T[],
+): OrderLineBrandCount[] {
+  const counts = new Map<string, number>();
+
+  items.forEach((item) => {
+    const name = orderLineBrandName(item);
+    if (!name) return;
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  });
+
+  return [...counts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((left, right) => left.name.localeCompare(right.name, 'es'));
 }
 
 /**
@@ -110,6 +151,13 @@ export function filterOrderLines<T extends OrderLineFilterItemLike>(
     if (key && selection.pinnedKeys?.has(key)) return true;
 
     if (!matchesOrderLineSearch(item, selection.query)) return false;
+
+    if (selection.brandName && selection.brandName !== 'all') {
+      const lineBrand = normalizeOrderLineSearch(orderLineBrandName(item));
+      if (!lineBrand || lineBrand !== normalizeOrderLineSearch(selection.brandName)) {
+        return false;
+      }
+    }
 
     if (selection.filter === 'pending') return predicates.isPending(item);
     if (selection.filter === 'difference') return predicates.hasDifference(item);

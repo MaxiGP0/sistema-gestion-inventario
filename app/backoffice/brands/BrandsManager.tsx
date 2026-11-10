@@ -1,8 +1,8 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Tag, Pencil, Trash2, X } from 'lucide-react';
+import { ChevronUp, Tag, Pencil, Trash2, X } from 'lucide-react';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import Button from '@/components/ui/Button';
 import Card from '@/components/ui/Card';
@@ -35,10 +35,12 @@ export default function BrandsManager({ initialBrands }: BrandsManagerProps) {
   const [name, setName] = useState('');
   const [codePrefix, setCodePrefix] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [mobileFormOpen, setMobileFormOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const formCardRef = useRef<HTMLDivElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const formPanelId = useId();
   const { showToast } = useToast();
   const router = useRouter();
 
@@ -57,6 +59,7 @@ export default function BrandsManager({ initialBrands }: BrandsManagerProps) {
       setName('');
       setCodePrefix('');
       setEditingId(null);
+      setMobileFormOpen(false);
       router.refresh();
     } catch (err: unknown) {
       const error = err as Error;
@@ -68,19 +71,34 @@ export default function BrandsManager({ initialBrands }: BrandsManagerProps) {
 
   const handleEdit = (brand: BrandDTO) => {
     setEditingId(brand._id);
+    setMobileFormOpen(true);
     setName(brand.name);
     setCodePrefix(brand.codePrefix || '');
 
-    // En mobile el formulario queda arriba: llevamos al usuario hasta él y
-    // dejamos el cursor listo en el nombre de la marca.
+    // En mobile el formulario queda arriba: lo desplegamos, llevamos al
+    // usuario hasta él y dejamos el cursor listo en el nombre de la marca.
     requestAnimationFrame(() => {
       formCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       nameInputRef.current?.focus({ preventScroll: true });
     });
   };
 
+  const openMobileForm = () => {
+    setMobileFormOpen(true);
+    requestAnimationFrame(() => {
+      formCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      nameInputRef.current?.focus({ preventScroll: true });
+    });
+  };
+
+  const closeMobileForm = () => {
+    if (editingId) return;
+    setMobileFormOpen(false);
+  };
+
   const handleCancelEdit = () => {
     setEditingId(null);
+    setMobileFormOpen(false);
     setName('');
     setCodePrefix('');
   };
@@ -102,14 +120,44 @@ export default function BrandsManager({ initialBrands }: BrandsManagerProps) {
   return (
     <>
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3 lg:gap-8">
+        {!mobileFormOpen && !editingId && (
+          <Card
+            padding="none"
+            className="flex items-center justify-between gap-3 px-3 py-1 lg:hidden"
+            data-testid="brand-mobile-form-toggle"
+          >
+            <div className="flex min-w-0 items-center gap-2">
+              <div className="rounded-md bg-action-soft p-2 text-action-text">
+                <Tag className="h-5 w-5" aria-hidden="true" />
+              </div>
+              <h2 className="truncate text-sm font-semibold text-foreground">Nueva Marca</h2>
+            </div>
+            <Button
+              type="button"
+              variant="primary"
+              size="sm"
+              onClick={openMobileForm}
+              aria-expanded={false}
+              aria-controls={formPanelId}
+              className="min-h-11 shrink-0"
+            >
+              + Nueva Marca
+            </Button>
+          </Card>
+        )}
+
         {/* Formulario */}
-        <div ref={formCardRef} className="scroll-mt-24">
+        <div
+          id={formPanelId}
+          ref={formCardRef}
+          className={`scroll-mt-24 ${mobileFormOpen || editingId ? 'block' : 'hidden'} lg:block`}
+        >
           <Card className={`h-fit transition-shadow ${editingId ? 'ring-2 ring-focus/40' : ''}`}>
             <div className="mb-6 flex items-center gap-3">
               <div className="rounded-md bg-action-soft p-3 text-action-text">
                 <Tag className="h-6 w-6" aria-hidden="true" />
               </div>
-              <div>
+              <div className="min-w-0">
                 <h2 className="text-base font-semibold text-foreground">
                   {editingId ? 'Editar Marca' : 'Nueva Marca'}
                 </h2>
@@ -117,6 +165,19 @@ export default function BrandsManager({ initialBrands }: BrandsManagerProps) {
                   {editingId ? 'Modificar datos de la marca' : 'Registrar nueva marca'}
                 </p>
               </div>
+              {!editingId && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={closeMobileForm}
+                  title="Ocultar formulario"
+                  aria-label="Ocultar formulario"
+                  className="ml-auto shrink-0 lg:hidden"
+                >
+                  <ChevronUp className="h-4 w-4" aria-hidden="true" />
+                </Button>
+              )}
             </div>
 
             {editingId && (
@@ -144,7 +205,7 @@ export default function BrandsManager({ initialBrands }: BrandsManagerProps) {
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   required
-                  placeholder="Ej: Capitalis, Algabó"
+                  placeholder="Ej: NovaFarma, BioSalud"
                   className="min-h-11 w-full rounded-md border border-border-strong bg-field px-3 py-2 text-sm text-foreground outline-none transition-colors placeholder:text-subtle focus:border-focus focus:ring-2 focus:ring-focus/30"
                 />
               </div>

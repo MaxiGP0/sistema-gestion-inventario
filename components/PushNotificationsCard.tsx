@@ -70,9 +70,7 @@ export default function PushNotificationsCard({
   const [testingPush, setTestingPush] = useState(false);
 
   const loadSubscriptions = useCallback(async (): Promise<PushSubscriptionListResponse> => {
-    const data = await api.get<PushSubscriptionListResponse>('/api/users/push-subscriptions', {
-      cache: 'no-store',
-    });
+    const data = await api.get<PushSubscriptionListResponse>('/api/users/push-subscriptions');
 
     setSubscriptions(data.subscriptions);
     setPublicKey(data.publicKey);
@@ -259,7 +257,7 @@ export default function PushNotificationsCard({
         return {
           icon: <Info className="h-4 w-4" aria-hidden="true" />,
           className: 'bg-status-draft-soft text-status-draft',
-          text: 'En iPhone/iPad las notificaciones push requieren iOS 16.4 o superior y la app instalada en la pantalla de inicio. Abrí Sistema de Gestión de Inventario desde el ícono instalado para activarlas.',
+          text: 'En iPhone/iPad las notificaciones push requieren iOS 16.4 o superior y la app instalada en la pantalla de inicio. Abrí la app desde el ícono instalado para activarlas.',
         };
       case 'unsupported':
         return {

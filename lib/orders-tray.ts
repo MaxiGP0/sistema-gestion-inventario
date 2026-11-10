@@ -159,6 +159,8 @@ export interface OrdersTrayFilters {
   status: OrdersTrayStatusFilterValue;
   datePreset: OrdersTrayDatePreset;
   showArchived: boolean;
+  /** Término libre de búsqueda; vacío cuando la bandeja no filtra. */
+  search?: string;
 }
 
 /** Query params que lee una bandeja al montar desde el servidor o la URL. */
@@ -166,6 +168,17 @@ export interface OrdersTrayQueryParams {
   status?: string | string[] | null;
   date?: string | string[] | null;
   archived?: string | string[] | null;
+  search?: string | string[] | null;
+}
+
+/** Largo máximo del término de búsqueda que viaja en la URL. */
+const MAX_ORDERS_TRAY_SEARCH_LENGTH = 80;
+
+/** Normaliza el término libre: sin espacios externos y acotado para la URL. */
+export function normalizeOrdersTraySearch(requested: string | string[] | null | undefined): string {
+  const value = Array.isArray(requested) ? requested[0] : requested;
+
+  return typeof value === 'string' ? value.trim().slice(0, MAX_ORDERS_TRAY_SEARCH_LENGTH) : '';
 }
 
 /** Resuelve el chip de fecha desde `?date=...`; valores ajenos caen a Todas. */
@@ -196,6 +209,7 @@ export function resolveOrdersTrayInitialFilters(
     status: resolveOrdersTrayStatusFilter(config, params.status).value,
     datePreset: resolveOrdersTrayDatePreset(params.date),
     showArchived: resolveOrdersTrayArchived(params.archived),
+    search: normalizeOrdersTraySearch(params.search),
   };
 }
 
@@ -217,6 +231,10 @@ export function buildOrdersTrayFilterSearchParams(
 
   if (filters.showArchived) params.set('archived', '1');
   else params.delete('archived');
+
+  const search = filters.search?.trim();
+  if (search) params.set('search', search);
+  else params.delete('search');
 
   return params;
 }
@@ -451,6 +469,7 @@ export function readOrdersTrayFilters(
           ? resolveOrdersTrayDatePreset(parsed.datePreset)
           : 'all',
       showArchived: parsed.showArchived === true,
+      search: normalizeOrdersTraySearch(parsed.search),
     };
   } catch {
     return null;

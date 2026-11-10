@@ -18,9 +18,11 @@ import { test } from 'node:test';
 import { isAbortError } from '../lib/api-client';
 import {
   CATALOG_CACHE_TTL_MS,
+  CATALOG_FOCUS_REVALIDATE_AFTER_MS,
   getCatalog,
   invalidateCatalogCache,
   revalidateCatalogOnFocus,
+  shouldRevalidateCatalogOnVisible,
   subscribeCatalogFocus,
 } from '../lib/catalog-query-cache';
 import { catalogCacheHeaders } from '../lib/catalog-http-cache';
@@ -262,6 +264,35 @@ test('revalidar al volver a foco invalida y avisa a los suscriptores', async (t)
 
   await getCatalog(url);
   assert.equal(calls.length, 2, 'después del foco debe consultarse de nuevo');
+});
+
+test('al volver a foco sólo invalida si la ausencia supera 30 s o venció el TTL', () => {
+  assert.equal(CATALOG_FOCUS_REVALIDATE_AFTER_MS, 30_000);
+
+  assert.equal(
+    shouldRevalidateCatalogOnVisible({ hiddenAt: 1_000_000, now: 1_005_000 }),
+    false,
+    'una ausencia de 5 s no debe invalidar todo el catálogo',
+  );
+  assert.equal(
+    shouldRevalidateCatalogOnVisible({ hiddenAt: 1_000_000, now: 1_040_000 }),
+    true,
+    'una ausencia de 40 s sí debe revalidar',
+  );
+  assert.equal(
+    shouldRevalidateCatalogOnVisible({
+      hiddenAt: 1_000_000,
+      now: 1_005_000,
+      hasExpiredEntries: true,
+    }),
+    true,
+    'una entrada vencida por TTL natural también justifica revalidar',
+  );
+  assert.equal(
+    shouldRevalidateCatalogOnVisible({ hiddenAt: null, now: 1_005_000 }),
+    false,
+    'sin una ocultación registrada no se invalida',
+  );
 });
 
 test('Cache-Control: private y max-age corto para catálogo y clientes', () => {

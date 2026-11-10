@@ -16,10 +16,10 @@ import {
   type NotificationCursor,
 } from './notification-cursor';
 import { notificationInboxForRole } from './notification-inbox';
+import { NOTIFICATION_PAGE_SIZE } from './types/notification';
 import type { NotificationTargetRole } from './validations';
 
-/** Cantidad máxima de notificaciones que devuelve una página por defecto. */
-export const NOTIFICATION_PAGE_SIZE = 30;
+export { NOTIFICATION_PAGE_SIZE };
 
 /** Tope de la página para que un cliente no pueda pedir la colección entera. */
 export const NOTIFICATION_MAX_PAGE_SIZE = 100;

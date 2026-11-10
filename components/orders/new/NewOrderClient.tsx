@@ -5,6 +5,7 @@ import dynamic from 'next/dynamic';
 import { useRouter } from 'next/navigation';
 import AppShell from '@/components/app-shell/AppShell';
 import ConfirmDialog from '@/components/ConfirmDialog';
+import KeepAwakeToggle from '@/components/KeepAwakeToggle';
 import { useToast } from '@/context/ToastContext';
 import { useOrderCatalog } from '@/hooks/useOrderCatalog';
 import { useOrderDraft } from '@/hooks/useOrderDraft';
@@ -14,6 +15,7 @@ import { useMobileKeyboardFocus } from '@/hooks/useVisualViewport';
 import Card from '@/components/ui/Card';
 import OrderCatalog from '@/components/orders/new/OrderCatalog';
 import OfflineCatalogBadge from '@/components/orders/new/OfflineCatalogBadge';
+import OfflineCatalogSyncProgress from '@/components/orders/new/OfflineCatalogSyncProgress';
 import OfflinePendingBanner from '@/components/orders/new/OfflinePendingBanner';
 import MobileClientPanel from '@/components/orders/new/MobileClientPanel';
 import ClientPanel from '@/components/orders/new/ClientPanel';
@@ -40,33 +42,45 @@ import {
   type OrderCatalogBrand,
   type OrderCatalogClient,
 } from '@/lib/order-catalog';
-import { api, ApiClientError, isAbortError, isNetworkError } from '@/lib/api-client';
+import {
+  api,
+  ApiClientError,
+  isAbortError,
+  isNetworkError,
+  isTimeoutError,
+} from '@/lib/api-client';
 import { getCatalog, invalidateCatalogCache } from '@/lib/catalog-query-cache';
 import { applyClientToOrderDraft } from '@/lib/order-draft';
 import {
   readOfflineCatalogBrands,
   readOfflineCatalogClients,
+  readOfflineClientLastOrder,
   readOfflineRecentClients,
   recordOfflineRecentClient,
+  rememberOfflineClientLastOrder,
   searchOfflineCatalogClients,
 } from '@/lib/offline-catalog';
 import {
   cacheInitialOfflineCatalog,
   isBrowserOffline,
-  prefetchOfflineCatalogClients,
-  prefetchOfflineCatalogProducts,
   rememberOfflineCatalogBrands,
   rememberOfflineCatalogClients,
+  syncOfflineCatalog,
 } from '@/lib/offline-catalog-sync';
 import {
   enqueuePendingOrderCreate,
+  enqueuePendingOrderPut,
   getPendingOrderRequests,
   OFFLINE_QUEUE_CHANGED_EVENT,
 } from '@/lib/offline-order-queue';
 import { createClientRequestId } from '@/lib/order-request-id';
-import { requestOrderBackgroundSync } from '@/lib/order-put-sync';
+import { requestOrderBackgroundSync, requestOrderPutBackgroundSync } from '@/lib/order-put-sync';
 import { isRetriableOrderPutStatus } from '@/lib/order-put-sync-core';
-import { buildOrderPrefill, buildPrefillOmittedMessage } from '@/lib/order-prefill';
+import {
+  buildOrderPrefill,
+  buildPrefillOmittedMessage,
+  orderItemProductId,
+} from '@/lib/order-prefill';
 import { markOrdersTrayForRefresh } from '@/lib/orders-tray-refresh';
 import type {
   BrandListResponse,
@@ -78,6 +92,7 @@ import type {
   OrderDetailResponse,
   OrderMutationResponse,
   OrderSummaryDTO,
+  OrderSummaryItemDTO,
   ProductDTO,
 } from '@/lib/types';
 
@@ -197,6 +212,7 @@ export default function NewOrderClient({
   const [paymentConditionDetail, setPaymentConditionDetail] = useState('');
   const [loading, setLoading] = useState(false);
   const [pendingSyncRequestId, setPendingSyncRequestId] = useState<string | null>(null);
+  const [pendingEditRedirectOrderId, setPendingEditRedirectOrderId] = useState<string | null>(null);
   const [showMobileCheckoutModal, setShowMobileCheckoutModal] = useState(false);
   const [showMobileClientModal, setShowMobileClientModal] = useState(false);
   const [showQuickCreateClientModal, setShowQuickCreateClientModal] = useState(false);
@@ -215,10 +231,11 @@ export default function NewOrderClient({
   const pendingDraftClientRef = useRef<OrderCatalogClient | null>(null);
   // La limpieza de la URL se hace una sola vez por visita.
   const cleanedPrefillUrlRef = useRef(false);
-  // El borrador sólo se restaura en un alta sin pedido precargado: con
-  // `?fromOrder=` el carrito del pedido es la fuente de verdad. Se fija al
-  // montar para que el `router.replace` posterior no vuelva a restaurarlo.
-  const [shouldRestoreDraft] = useState(() => !isEditMode && !initialOrder && !fromOrderId);
+  // El borrador se restaura en un alta sin pedido precargado y también en la
+  // edición de un borrador existente (clave aislada por pedido y versión).
+  const [shouldRestoreDraft] = useState(() =>
+    isEditMode ? Boolean(initialOrder?._id) : !initialOrder && !fromOrderId,
+  );
   // El autoguardado recién se habilita cuando terminó la precarga inicial (o
   // cuando no había ninguna), para no persistir un carrito a medio hidratar.
   const [draftSaveReady, setDraftSaveReady] = useState(!hasPrefillSource);
@@ -279,7 +296,9 @@ export default function NewOrderClient({
   const { clearDraft } = useOrderDraft({
     draft,
     userId,
-    enabled: !isEditMode && draftSaveReady,
+    orderId: isEditMode ? (initialOrder?._id ?? null) : undefined,
+    version: isEditMode ? (initialOrder?.version ?? 0) : undefined,
+    enabled: draftSaveReady && (!isEditMode || Boolean(initialOrder?._id)),
     restore: shouldRestoreDraft,
     onRestore: (saved) => {
       // Si la visita trae `?clientId=`, el borrador aporta el carrito y los
@@ -290,11 +309,18 @@ export default function NewOrderClient({
       pendingDraftClientRef.current = null;
 
       setQuantities(restored.quantities);
-      setSelectedClient(restored.selectedClient);
+      setSelectedClient((current) =>
+        isEditMode
+          ? restored.selectedClient?.code
+            ? restored.selectedClient
+            : (current ?? restored.selectedClient)
+          : restored.selectedClient,
+      );
       setComment(restored.comment);
       setItemDiscounts(restored.itemDiscounts);
       setGeneralDiscount(restored.generalDiscount);
       setBrandDiscounts(restored.brandDiscounts);
+      setShowBrandDiscountsPanel(Object.keys(restored.brandDiscounts).length > 0);
       invoiceTypeTouchedRef.current = false;
       paymentConditionTouchedRef.current = false;
       setInvoiceType(restored.invoiceType);
@@ -312,7 +338,13 @@ export default function NewOrderClient({
         catalog.setSelectedBrandFilter(SELECTED_PRODUCTS_FILTER);
       }
     },
-    onRestored: () => showToast('Borrador de pedido restaurado automáticamente', 'success'),
+    onRestored: () =>
+      showToast(
+        isEditMode
+          ? 'Cambios sin guardar restaurados'
+          : 'Borrador de pedido restaurado automáticamente',
+        'success',
+      ),
   });
 
   // El aviso local desaparece cuando el indicador global sincroniza (o
@@ -345,6 +377,39 @@ export default function NewOrderClient({
       window.removeEventListener(OFFLINE_QUEUE_CHANGED_EVENT, refresh);
     };
   }, [pendingSyncRequestId]);
+
+  useEffect(() => {
+    if (!pendingEditRedirectOrderId) return;
+
+    let active = true;
+    const checkSynced = async () => {
+      try {
+        const entries = await getPendingOrderRequests();
+        const queued = entries.find(
+          (entry) => entry.kind === 'update' && entry.orderId === pendingEditRedirectOrderId,
+        );
+        if (!active) return;
+
+        if (!queued) {
+          const targetOrderId = pendingEditRedirectOrderId;
+          setPendingEditRedirectOrderId(null);
+          markOrdersTrayForRefresh('/orders');
+          markOrdersTrayForRefresh(`/orders/${targetOrderId}`);
+          startTransition(() => router.push(`/orders/${targetOrderId}`));
+        } else if (queued.status === 'failed') {
+          setPendingEditRedirectOrderId(null);
+        }
+      } catch {
+        // IndexedDB no disponible.
+      }
+    };
+
+    window.addEventListener(OFFLINE_QUEUE_CHANGED_EVENT, checkSynced);
+    return () => {
+      active = false;
+      window.removeEventListener(OFFLINE_QUEUE_CHANGED_EVENT, checkSynced);
+    };
+  }, [pendingEditRedirectOrderId, router]);
 
   /** Usa el snapshot local cuando no hay red o la consulta falló. */
   const loadClientsFromCache = useCallback(
@@ -456,6 +521,20 @@ export default function NewOrderClient({
     }
   }, [clientSearch, clientSearchRequest, loadClientsFromCache, userId]);
 
+  /**
+   * Delta liviano del catálogo offline para foco/reconexión. `syncOfflineCatalog`
+   * aplica el throttle de 60 s y respeta ahorro de datos; si no hay red o el
+   * snapshot todavía no tuvo un full sync, no bloquea la pantalla.
+   */
+  const requestAutoCatalogDelta = useCallback(() => {
+    if (!userId || isBrowserOffline()) return;
+
+    void syncOfflineCatalog(userId, { auto: true }).catch((error) => {
+      if (isAbortError(error)) return;
+      console.warn('No se pudo sincronizar el catálogo offline:', error);
+    });
+  }, [userId]);
+
   useEffect(() => {
     // Buscar también cuando el modal móvil está abierto: en el teléfono este es
     // el único buscador de clientes visible y no activa showClientDropdown.
@@ -556,23 +635,24 @@ export default function NewOrderClient({
     };
   }, [initialBrands, initialClients, refreshCatalog, userId]);
 
-  // Precalienta productos y clientes después de la primera pintura: el buscador
-  // offline necesita el catálogo completo aunque el vendedor nunca haya abierto
-  // esas pantallas en esta sesión. El TTL evita repetirlo en cada visita.
+  // Sincroniza productos y clientes después de la primera pintura. El primer
+  // intento hace full sync paginado; los siguientes piden sólo deltas. Con
+  // ahorro de datos queda la actualización manual de Configuración.
   useEffect(() => {
     if (!userId) return;
 
+    const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      if (isBrowserOffline()) return;
-      void prefetchOfflineCatalogProducts(userId).catch((error) => {
-        console.warn('No se pudo precargar el catálogo de productos offline:', error);
-      });
-      void prefetchOfflineCatalogClients(userId).catch((error) => {
-        console.warn('No se pudo precargar el catálogo de clientes offline:', error);
+      void syncOfflineCatalog(userId, { auto: true, signal: controller.signal }).catch((error) => {
+        if (isAbortError(error)) return;
+        console.warn('No se pudo sincronizar el catálogo offline:', error);
       });
     }, 2_500);
 
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
   }, [userId]);
 
   // Al recuperar conexión se revalida el catálogo guardado. Al perderla, el
@@ -580,6 +660,7 @@ export default function NewOrderClient({
   useEffect(() => {
     const handleOnline = () => {
       void refreshCatalog({ force: true });
+      requestAutoCatalogDelta();
       if ((showClientDropdown || showMobileClientModal) && clientSearch.trim()) {
         void searchClients();
       }
@@ -599,6 +680,7 @@ export default function NewOrderClient({
     clientSearch,
     clients.length,
     refreshCatalog,
+    requestAutoCatalogDelta,
     searchClients,
     showClientDropdown,
     showMobileClientModal,
@@ -606,13 +688,22 @@ export default function NewOrderClient({
 
   // Al volver a foco se revalidan clientes/marcas y, si el selector está
   // abierto, la búsqueda vigente (la caché ya se invalidó antes del aviso).
+  // También se pide el delta del catálogo offline sin bloquear la pantalla.
   useCatalogFocusRevalidation(
     useCallback(() => {
       void refreshCatalog({ force: true });
+      requestAutoCatalogDelta();
       if ((showClientDropdown || showMobileClientModal) && clientSearch.trim()) {
         void searchClients();
       }
-    }, [refreshCatalog, searchClients, showClientDropdown, showMobileClientModal, clientSearch]),
+    }, [
+      refreshCatalog,
+      requestAutoCatalogDelta,
+      searchClients,
+      showClientDropdown,
+      showMobileClientModal,
+      clientSearch,
+    ]),
   );
 
   const selectedClientId = selectedClient?._id;
@@ -623,8 +714,8 @@ export default function NewOrderClient({
    * avisan; el catálogo de productos se revalida para no usar precios viejos.
    */
   const applyOrderPrefill = useCallback(
-    (order: OrderDTO) => {
-      const prefill = buildOrderPrefill(order, defaultClientsRef.current);
+    (order: OrderDTO | OrderSummaryDTO, options: { client?: OrderCatalogClient | null } = {}) => {
+      const prefill = buildOrderPrefill(order, defaultClientsRef.current, options.client ?? null);
 
       if (!prefill.client) {
         showToast(
@@ -711,6 +802,7 @@ export default function NewOrderClient({
       if (appliedPrefillRef.current === key) return;
       appliedPrefillRef.current = key;
       applyOrderPrefill(initialOrder);
+      setDraftSaveReady(true);
       return;
     }
 
@@ -729,7 +821,7 @@ export default function NewOrderClient({
       let cancelled = false;
 
       api
-        .get<OrderDetailResponse>(`/api/orders/${fromOrderId}`, { cache: 'no-store' })
+        .get<OrderDetailResponse>(`/api/orders/${fromOrderId}`)
         .then((data) => {
           if (cancelled || appliedPrefillRef.current === key) return;
           appliedPrefillRef.current = key;
@@ -780,9 +872,7 @@ export default function NewOrderClient({
         // 2) Con red, ficha puntual por id (puede no estar en los primeros 50).
         if (!isBrowserOffline()) {
           try {
-            const data = await api.get<ClientDetailResponse>(`/api/clients/${requestedClientId}`, {
-              cache: 'no-store',
-            });
+            const data = await api.get<ClientDetailResponse>(`/api/clients/${requestedClientId}`);
             if (cancelled) return;
             appliedPrefillRef.current = key;
             rememberOfflineCatalogClients(userId, [data.client]);
@@ -842,7 +932,9 @@ export default function NewOrderClient({
   ]);
 
   // "Repetir último pedido": el listado ya viene acotado por la sesión (el
-  // vendedor sólo ve los propios) y ordenado por createdAt descendente.
+  // vendedor sólo ve los propios) y ordenado por createdAt descendente. Sin
+  // red (o si la consulta falla por timeout) se usa el resumen guardado en
+  // IndexedDB, que también trae `items.productId` para precargar en un paso.
   useEffect(() => {
     let cancelled = false;
 
@@ -857,6 +949,30 @@ export default function NewOrderClient({
     setLastOrderClientId(null);
     setLoadingLastOrder(true);
 
+    const applyCachedLastOrder = async () => {
+      try {
+        const cached = await readOfflineClientLastOrder(userId, selectedClientId);
+        if (cancelled) return;
+        setLastOrder(cached);
+        setLastOrderClientId(cached ? selectedClientId : null);
+      } catch (error) {
+        if (cancelled) return;
+        console.error('Error leyendo el último pedido guardado:', error);
+        setLastOrder(null);
+        setLastOrderClientId(null);
+      }
+    };
+
+    if (isBrowserOffline()) {
+      void applyCachedLastOrder().finally(() => {
+        if (!cancelled) setLoadingLastOrder(false);
+      });
+
+      return () => {
+        cancelled = true;
+      };
+    }
+
     const params = new URLSearchParams({
       clientId: selectedClientId,
       limit: '1',
@@ -865,21 +981,35 @@ export default function NewOrderClient({
     });
 
     api
-      .get<OrderCursorListResponse>(`/api/orders?${params.toString()}`, { cache: 'no-store' })
+      .get<OrderCursorListResponse>(`/api/orders?${params.toString()}`)
       .then((data) => {
-        if (!cancelled) {
-          setLastOrder(data.orders[0] ?? null);
-          // La precarga comercial sólo aplica al cliente que originó la
-          // consulta, nunca a un pedido anterior de otro cliente.
-          setLastOrderClientId(selectedClientId);
+        if (cancelled) return;
+        const latest = data.orders[0] ?? null;
+        setLastOrder(latest);
+        // La precarga comercial sólo aplica al cliente que originó la
+        // consulta, nunca a un pedido anterior de otro cliente.
+        setLastOrderClientId(selectedClientId);
+
+        if (latest) {
+          void rememberOfflineClientLastOrder(userId, selectedClientId, latest).catch((error) => {
+            console.warn('No se pudo guardar el último pedido del cliente:', error);
+          });
         }
       })
-      .catch((err: unknown) => {
-        if (!cancelled) {
-          console.error('Error buscando el último pedido del cliente:', err);
-          setLastOrder(null);
-          setLastOrderClientId(null);
+      .catch(async (err: unknown) => {
+        if (cancelled) return;
+        if (isAbortError(err)) return;
+
+        // Red caída o timeout con `navigator.onLine` todavía en true: la copia
+        // local mantiene el autocompletado y la opción de repetir.
+        if (isNetworkError(err) || isTimeoutError(err)) {
+          await applyCachedLastOrder();
+          return;
         }
+
+        console.error('Error buscando el último pedido del cliente:', err);
+        setLastOrder(null);
+        setLastOrderClientId(null);
       })
       .finally(() => {
         if (!cancelled) setLoadingLastOrder(false);
@@ -888,7 +1018,7 @@ export default function NewOrderClient({
     return () => {
       cancelled = true;
     };
-  }, [selectedClientId]);
+  }, [selectedClientId, userId]);
 
   // Autocompleta factura y condición de pago con el último pedido del cliente.
   // Se respeta cualquier elección manual del vendedor en el pedido actual.
@@ -996,10 +1126,21 @@ export default function NewOrderClient({
     const { orderId, clientName } = repeatConfirm;
     setRepeatConfirm(null);
 
+    // El listado ya trae `items.productId`: se precarga en memoria sin otro
+    // request. El detalle queda como fallback sólo para pedidos históricos a
+    // los que les falte la referencia de alguna línea.
+    const summary = lastOrder?._id === orderId ? lastOrder : null;
+    if (
+      summary &&
+      summary.items.length > 0 &&
+      summary.items.every((item) => orderItemProductId(item))
+    ) {
+      const applied = applyOrderPrefill(summary, { client: selectedClient });
+      if (applied) return;
+    }
+
     try {
-      const data = await api.get<OrderDetailResponse>(`/api/orders/${orderId}`, {
-        cache: 'no-store',
-      });
+      const data = await api.get<OrderDetailResponse>(`/api/orders/${orderId}`);
       applyOrderPrefill(data.order);
     } catch (err: unknown) {
       const repeatError = err as Error;
@@ -1184,23 +1325,79 @@ export default function NewOrderClient({
       submittingRef.current = true;
       setLoading(true);
 
-      try {
-        await api.put<OrderMutationResponse>(`/api/orders/${initialOrder._id}`, {
-          mode: 'draft-edit',
-          version: initialOrder.version ?? 0,
-          items,
-          invoiceType,
-          paymentCondition,
-          paymentConditionDetail:
-            paymentCondition === 'otro' ? paymentConditionDetail.trim() : undefined,
-          comment: comment.trim() || undefined,
-        });
+      const draftEditUrl = `/api/orders/${initialOrder._id}`;
+      const draftEditBody = {
+        mode: 'draft-edit' as const,
+        version: initialOrder.version ?? 0,
+        items,
+        invoiceType,
+        paymentCondition,
+        paymentConditionDetail:
+          paymentCondition === 'otro' ? paymentConditionDetail.trim() : undefined,
+        comment: comment.trim() || undefined,
+      };
 
+      const saveEditLocally = async (message: string) => {
+        try {
+          await enqueuePendingOrderPut({
+            orderId: initialOrder._id,
+            url: draftEditUrl,
+            body: draftEditBody,
+            clientName: selectedClient.name,
+            total: finalTotal,
+          });
+          clearDraft();
+          setShowMobileCheckoutModal(false);
+          void requestOrderPutBackgroundSync();
+          showToast(message, 'success', 7000);
+          markOrdersTrayForRefresh('/orders');
+          markOrdersTrayForRefresh(`/orders/${initialOrder._id}`);
+          if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+            setPendingEditRedirectOrderId(initialOrder._id);
+          } else {
+            startTransition(() => router.push(`/orders/${initialOrder._id}`));
+          }
+        } catch (queueError) {
+          console.error('Error guardando la edición del borrador en IndexedDB:', queueError);
+          showToast(
+            'No se pudo guardar los cambios localmente. Revisá el almacenamiento del navegador e intentá de nuevo.',
+            'error',
+            7000,
+          );
+        }
+      };
+
+      try {
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+          await saveEditLocally(
+            'Pendiente de sincronizar: los cambios del borrador quedaron guardados y se enviarán al reconectar.',
+          );
+          return;
+        }
+
+        await api.put<OrderMutationResponse>(draftEditUrl, draftEditBody);
+
+        clearDraft();
+        setShowMobileCheckoutModal(false);
         showToast('Borrador actualizado exitosamente', 'success');
         markOrdersTrayForRefresh('/orders');
         markOrdersTrayForRefresh(`/orders/${initialOrder._id}`);
         startTransition(() => router.push(`/orders/${initialOrder._id}`));
       } catch (err: unknown) {
+        if (
+          isNetworkError(err) ||
+          isTimeoutError(err) ||
+          (typeof navigator !== 'undefined' && navigator.onLine === false) ||
+          (err instanceof ApiClientError && isRetriableOrderPutStatus(err.status))
+        ) {
+          await saveEditLocally(
+            isTimeoutError(err)
+              ? 'La conexión tardó demasiado: los cambios del borrador quedaron guardados y se enviarán al reconectar.'
+              : 'Pendiente de sincronizar: los cambios del borrador quedaron guardados y se enviarán al reconectar.',
+          );
+          return;
+        }
+
         const error = err as Error;
         showToast(error.message || 'No se pudo actualizar el borrador', 'error', 8000);
       } finally {
@@ -1224,6 +1421,46 @@ export default function NewOrderClient({
       paymentConditionDetail:
         paymentCondition === 'otro' ? paymentConditionDetail.trim() : undefined,
       clientRequestId,
+    };
+
+    // Refresca el último pedido offline en el mismo instante del alta, sin
+    // esperar a que el servidor responda (la cola offline también lo alimenta).
+    const rememberCreatedClientLastOrder = (createdOrderId: string) => {
+      const summaryItems: OrderSummaryItemDTO[] = items.map((item) => {
+        const product = productCache[item.productId];
+        return {
+          productId: item.productId,
+          productName: product?.name,
+          productCode: product?.code,
+          requestedQuantity: item.requestedQuantity,
+          verifiedQuantity: item.requestedQuantity,
+          isPending: false,
+        };
+      });
+      const summary: OrderSummaryDTO = {
+        _id: createdOrderId,
+        clientId: {
+          _id: selectedClient._id,
+          code: selectedClient.code,
+          name: selectedClient.name,
+          localidad: selectedClient.localidad,
+          province: selectedClient.province,
+        },
+        clientName: selectedClient.name,
+        clientCode: selectedClient.code,
+        status: 'borrador',
+        finalTotal,
+        createdBy: salesperson,
+        createdAt: new Date().toISOString(),
+        invoiceType: invoiceType || undefined,
+        paymentCondition: paymentCondition || undefined,
+        paymentConditionDetail: orderBody.paymentConditionDetail,
+        items: summaryItems,
+      };
+
+      void rememberOfflineClientLastOrder(userId, selectedClient._id, summary).catch((error) => {
+        console.warn('No se pudo guardar el último pedido del cliente:', error);
+      });
     };
 
     const resetFormAfterQueue = () => {
@@ -1253,6 +1490,7 @@ export default function NewOrderClient({
           clientName: selectedClient.name,
           total: finalTotal,
         });
+        rememberCreatedClientLastOrder(`offline:${clientRequestId}`);
         resetFormAfterQueue();
         setPendingSyncRequestId(clientRequestId);
         void requestOrderBackgroundSync();
@@ -1277,6 +1515,7 @@ export default function NewOrderClient({
 
       const created = await api.post<OrderMutationResponse>('/api/orders', orderBody);
       const createdOrderId = created.order?._id;
+      rememberCreatedClientLastOrder(createdOrderId ?? `local:${clientRequestId}`);
 
       // El toast vive en el layout raíz y sobrevive a la navegación: no hace
       // falta retrasar el redirect para que el usuario lo vea.
@@ -1300,11 +1539,14 @@ export default function NewOrderClient({
       // clave idempotente) queda en IndexedDB para reintentarse sin duplicar.
       if (
         isNetworkError(err) ||
+        isTimeoutError(err) ||
         (typeof navigator !== 'undefined' && navigator.onLine === false) ||
         (err instanceof ApiClientError && isRetriableOrderPutStatus(err.status))
       ) {
         await saveLocally(
-          'Pendiente de sincronizar: el pedido quedó guardado y se enviará al reconectar.',
+          isTimeoutError(err)
+            ? 'La conexión tardó demasiado: el pedido quedó guardado y se enviará al reconectar.'
+            : 'Pendiente de sincronizar: el pedido quedó guardado y se enviará al reconectar.',
         );
         return;
       }
@@ -1351,7 +1593,13 @@ export default function NewOrderClient({
       maxWidth="7xl"
       mainClassName="max-lg:[&_input]:scroll-mb-24 max-lg:[&_textarea]:scroll-mb-24"
     >
+      <div className="mb-3 flex justify-end">
+        <KeepAwakeToggle />
+      </div>
+
       {pendingSyncRequestId && <OfflinePendingBanner clientRequestId={pendingSyncRequestId} />}
+
+      <OfflineCatalogSyncProgress className="mb-4" />
 
       {(offlineCatalogNotice || catalog.catalogFromCache) && (
         <div className="mb-4">
@@ -1419,6 +1667,8 @@ export default function NewOrderClient({
               onQuantityChange={handleQuantityChange}
               onQuantityDelta={handleQuantityDelta}
               onRemoveItem={handleRemoveItem}
+              onDiscountChange={handleDiscountChange}
+              onDiscountClear={handleDiscountClear}
               loading={loading}
               onSubmit={handleSubmitOrder}
               submitLabel={isEditMode ? 'Guardar Cambios' : undefined}
@@ -1528,6 +1778,8 @@ export default function NewOrderClient({
           onQuantityChange={handleQuantityChange}
           onQuantityDelta={handleQuantityDelta}
           onRemoveItem={handleRemoveItem}
+          onDiscountChange={handleDiscountChange}
+          onDiscountClear={handleDiscountClear}
           subtotal={subtotal}
           totalDiscount={totalDiscount}
           finalTotal={finalTotal}

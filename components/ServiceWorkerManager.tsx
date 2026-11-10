@@ -154,11 +154,24 @@ export default function ServiceWorkerManager() {
     };
   }, []);
 
+  // La tarjeta es alta y comparte el borde inferior con otros avisos: marca
+  // su presencia para que el toast se apoye por encima cuando coinciden.
+  useEffect(() => {
+    if (!waitingWorker) return;
+
+    const root = document.documentElement;
+    root.dataset.swUpdateVisible = 'true';
+
+    return () => {
+      delete root.dataset.swUpdateVisible;
+    };
+  }, [waitingWorker]);
+
   if (!waitingWorker) return null;
 
   return (
     <div
-      className="fixed inset-x-3 bottom-[calc(env(safe-area-inset-bottom)+var(--mobile-sync-clearance))] z-50 mx-auto max-w-md rounded-lg border border-border bg-surface p-3 shadow-elevation-2 sm:inset-x-auto sm:right-4 sm:bottom-4 sm:mx-0 sm:w-96"
+      className="fixed inset-x-3 bottom-[calc(env(safe-area-inset-bottom)+var(--mobile-sw-clearance))] z-50 mx-auto max-w-md rounded-lg border border-border bg-surface p-3 shadow-elevation-2 transition-all duration-200 motion-reduce:transition-none [html[data-mobile-keyboard='open']_&]:pointer-events-none [html[data-mobile-keyboard='open']_&]:translate-y-2 [html[data-mobile-keyboard='open']_&]:opacity-0 sm:inset-x-auto sm:right-4 sm:bottom-4 sm:mx-0 sm:w-96"
       role="status"
       aria-live="polite"
     >

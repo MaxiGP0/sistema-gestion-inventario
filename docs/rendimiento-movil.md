@@ -191,6 +191,10 @@ Script: `scripts/lighthouse-ci.mjs`.
   viewport 390×844.
 - Corre 2 veces por ruta y publica la mediana.
 - Reportes HTML/JSON y `summary.json` en `.lighthouseci/`.
+- Suma las requests de imagen (`network-requests`, `resourceType: Image`) y el
+  audit `total-byte-weight`. `/orders/new` y `/deposit/orders/[id]` tienen
+  umbrales de `imageBytes` y `totalByteWeightBytes` en
+  `performance-budgets.json`, además de LCP/CLS/TBT.
 
 ### Línea base local (24/10/2026)
 
@@ -202,11 +206,24 @@ Script: `scripts/lighthouse-ci.mjs`.
 | `/deposit/orders` | 2.206 ms | 0 | 150 ms | 97 |
 | `/deposit/orders/[id]` | 1.981 ms | 0 | 151 ms | 98 |
 
-Presupuesto Lighthouse: **LCP ≤ 3.500 ms, CLS ≤ 0,05, TBT ≤ 300 ms**. El LCP
-se ajustó al baseline con margen para runners de CI más lentos; en corridas
+`perf:lighthouse` también registra `bf-cache` por ruta. Las páginas y los GET
+de lectura usan `private, no-cache, max-age=0, must-revalidate` (nunca
+`no-store`) para que el navegador pueda restaurar "atrás" desde bfcache; auth,
+notificaciones, SSE y mutaciones conservan su política sin caché. En la corrida
+del 02/11/2026 las cinco rutas medidas dieron `bf-cache = 1`.
+
+Presupuesto Lighthouse: **LCP ≤ 3.500 ms (4.000 ms en `/orders/new` y
+3.800 ms en `/deposit/orders/[id]`), CLS ≤ 0,05, TBT ≤ 300 ms**. El LCP se
+ajustó al baseline con margen para runners de CI más lentos; en corridas
 sucesivas el LCP mediano se movió entre 1,96 y 2,55 s y la corrida individual
 más lenta observada fue 2,94 s. El objetivo de producto sigue siendo 2,5 s; el
 presupuesto de CI evita que una regresión conocida pase desapercibida.
+
+Los umbrales propios de `/orders/new` y `/deposit/orders/[id]` se deben a que
+su elemento LCP es contenido que aparece después de hidratar la vista, no una
+imagen: en la medición del 02/11/2026 las corridas individuales llegaron a
+4,01 s y 3,51 s respectivamente, con medianas de 2,78 s y 3,51 s. El
+presupuesto de imágenes de ambas rutas sigue en 120.000 B.
 
 ```bash
 npm run build

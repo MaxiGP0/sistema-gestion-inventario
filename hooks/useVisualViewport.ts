@@ -164,5 +164,22 @@ export function useMobileKeyboardFocus(enabled = true): boolean {
     };
   }, [enabled]);
 
+  // Refleja el foco editable en <html> para que los avisos flotantes que no
+  // comparten árbol de React (indicador offline, service worker, toasts) se
+  // oculten con CSS mientras el teclado virtual tapa la mitad inferior.
+  useEffect(() => {
+    const root = document.documentElement;
+
+    if (inputFocused) {
+      root.dataset.mobileKeyboard = 'open';
+    } else {
+      delete root.dataset.mobileKeyboard;
+    }
+
+    return () => {
+      delete root.dataset.mobileKeyboard;
+    };
+  }, [inputFocused]);
+
   return inputFocused;
 }

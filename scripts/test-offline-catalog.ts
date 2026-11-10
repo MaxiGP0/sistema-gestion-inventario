@@ -18,20 +18,25 @@ import { beforeEach, test } from 'node:test';
 import {
   buildOfflineCatalogConfig,
   clearOfflineCatalogForUser,
+  clearOfflineClientLastOrdersForUser,
   closeOfflineCatalogDatabase,
   deleteOfflineCatalogDatabase,
   OFFLINE_CATALOG_DB_NAME,
   OFFLINE_CATALOG_DB_VERSION,
   OFFLINE_CATALOG_DEFAULT_LIMITS,
   OFFLINE_CATALOG_DEFAULT_TTL_MS,
+  OFFLINE_CATALOG_LEGACY_LIMITS,
   OFFLINE_CATALOG_STORE_NAMES,
+  OFFLINE_CLIENT_LAST_ORDER_TTL_MS,
   offlineCatalogRecordKey,
   readOfflineCatalogBrands,
   readOfflineCatalogClients,
   readOfflineCatalogMeta,
   readOfflineCatalogProducts,
+  readOfflineClientLastOrder,
   readOfflineRecentClients,
   recordOfflineRecentClient,
+  rememberOfflineClientLastOrder,
   searchOfflineCatalogClients,
   searchOfflineCatalogProducts,
   writeOfflineCatalogBrands,
@@ -40,12 +45,16 @@ import {
   type OfflineCatalogClient,
 } from '../lib/offline-catalog';
 import {
+  MIN_AUTO_DELTA_INTERVAL_MS,
   prefetchOfflineCatalogClients,
   prefetchOfflineCatalogProducts,
   rememberOfflineCatalogClients,
   rememberOfflineCatalogProducts,
+  shouldAutoSyncOfflineCatalog,
+  syncOfflineCatalog,
 } from '../lib/offline-catalog-sync';
-import type { BrandDTO, ProductDTO } from '../lib/types';
+import { clearUserOfflineData } from '../lib/pwa-client';
+import type { BrandDTO, OrderSummaryDTO, ProductDTO } from '../lib/types';
 
 const USER_A = 'user-a';
 const USER_B = 'user-b';
@@ -73,7 +82,113 @@ const makeProduct = (id: string, code: string, name: string, brandId = 'brand-1'
 
 const makeBrand = (id: string, name: string): BrandDTO => ({ _id: id, name });
 
+const makeLastOrder = (
+  id: string,
+  clientId: string,
+  overrides: Partial<OrderSummaryDTO> = {},
+): OrderSummaryDTO => ({
+  _id: id,
+  clientId: { _id: clientId, code: 'CLI-1', name: 'Farmacia Uno' },
+  clientName: 'Farmacia Uno',
+  clientCode: 'CLI-1',
+  status: 'borrador',
+  finalTotal: 2_420,
+  createdBy: 'vendedor',
+  createdAt: '2026-01-05T10:00:00.000Z',
+  invoiceType: 'B',
+  paymentCondition: 'cuenta_corriente',
+  items: [
+    {
+      _id: 'line-1',
+      productId: 'product-1',
+      productName: 'Producto Uno',
+      productCode: 'P1',
+      requestedQuantity: 2,
+      verifiedQuantity: 2,
+      isPending: false,
+    },
+  ],
+  ...overrides,
+});
+
+interface SyncProduct {
+  _id: string;
+  code: string;
+  name: string;
+  price: number;
+  priceWithIva: number;
+  brandId: { _id: string; name: string };
+  updatedAt: string;
+  active: boolean;
+}
+
+const makeSyncProduct = (index: number, updatedAt: string): SyncProduct => ({
+  _id: `sync-product-${index}`,
+  code: `SYNC-${String(index).padStart(4, '0')}`,
+  name: `Producto sync ${index}`,
+  price: 100,
+  priceWithIva: 121,
+  brandId: { _id: 'brand-1', name: 'Marca Uno' },
+  updatedAt,
+  active: true,
+});
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+interface RawCatalogRecord {
+  key: string;
+  savedAt: number;
+  data: { name?: string };
+}
+
+async function readRawCatalogRecord(
+  storeName: string,
+  key: string,
+): Promise<RawCatalogRecord | undefined> {
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open(OFFLINE_CATALOG_DB_NAME, OFFLINE_CATALOG_DB_VERSION);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+
+  try {
+    return await new Promise<RawCatalogRecord | undefined>((resolve, reject) => {
+      const transaction = db.transaction(storeName, 'readonly');
+      const request = transaction.objectStore(storeName).get(key);
+      request.onsuccess = () => resolve(request.result as RawCatalogRecord | undefined);
+      request.onerror = () => reject(request.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+/** Cuenta los `put` que recibe un store mientras corre la acción. */
+async function countObjectStorePuts(
+  storeName: string,
+  action: () => Promise<void>,
+): Promise<number> {
+  const prototype = IDBObjectStore.prototype as IDBObjectStore;
+  const originalPut = prototype.put;
+  let count = 0;
+
+  prototype.put = function (
+    this: IDBObjectStore,
+    value: unknown,
+    key?: IDBValidKey,
+  ): IDBRequest<IDBValidKey> {
+    if (this.name === storeName) count += 1;
+    return originalPut.call(this, value, key);
+  };
+
+  try {
+    await action();
+  } finally {
+    prototype.put = originalPut;
+  }
+
+  return count;
+}
 
 interface FetchCall {
   url: string;
@@ -124,26 +239,30 @@ beforeEach(async () => {
   await deleteOfflineCatalogDatabase();
 });
 
-test('el formato v1 define los cinco stores y claves aisladas por usuario', () => {
+test('el formato v2 define los stores y claves aisladas por usuario', () => {
   assert.equal(OFFLINE_CATALOG_DB_NAME, 'sgi-offline-catalog');
-  assert.equal(OFFLINE_CATALOG_DB_VERSION, 1);
+  assert.equal(OFFLINE_CATALOG_DB_VERSION, 2);
   assert.deepEqual(Object.values(OFFLINE_CATALOG_STORE_NAMES).sort(), [
     'brands',
+    'clientLastOrders',
     'clients',
     'meta',
     'products',
     'recentClients',
   ]);
   assert.equal(offlineCatalogRecordKey('u1', 'c1'), 'u1:c1');
+  assert.equal(OFFLINE_CLIENT_LAST_ORDER_TTL_MS, 30 * DAY);
 });
 
 test('los TTL y límites por defecto son los documentados y se pueden ajustar', () => {
   assert.equal(OFFLINE_CATALOG_DEFAULT_TTL_MS.clients, 7 * DAY);
   assert.equal(OFFLINE_CATALOG_DEFAULT_TTL_MS.products, 7 * DAY);
   assert.equal(OFFLINE_CATALOG_DEFAULT_TTL_MS.brands, 30 * DAY);
-  assert.equal(OFFLINE_CATALOG_DEFAULT_LIMITS.clients, 500);
-  assert.equal(OFFLINE_CATALOG_DEFAULT_LIMITS.products, 500);
+  assert.equal(OFFLINE_CATALOG_DEFAULT_LIMITS.clients, 2_000);
+  assert.equal(OFFLINE_CATALOG_DEFAULT_LIMITS.products, 5_000);
   assert.equal(OFFLINE_CATALOG_DEFAULT_LIMITS.recentClients, 5);
+  assert.equal(OFFLINE_CATALOG_LEGACY_LIMITS.clients, 500);
+  assert.equal(OFFLINE_CATALOG_LEGACY_LIMITS.products, 500);
 
   const custom = buildOfflineCatalogConfig({
     ttlMs: { clients: 1_000 },
@@ -257,9 +376,11 @@ test('al vencer el TTL el snapshot deja de ser fresco y no devuelve datos', asyn
   assert.equal(search.total, 0);
 
   // Una revalidación (escritura nueva) descarta lo vencido y vuelve a dejar
-  // el snapshot fresco.
+  // el snapshot fresco. Se lee con el TTL por defecto: con el TTL de 2 ms
+  // cualquier demora de IndexedDB en CI volvería a marcar como vencido el
+  // registro recién escrito y el test sería flaky.
   await writeOfflineCatalogClients(USER_A, [makeClient('c2', 'CLI-2', 'Actualizado')], shortTtl);
-  const refreshed = await readOfflineCatalogClients(USER_A, shortTtl);
+  const refreshed = await readOfflineCatalogClients(USER_A);
   assert.equal(refreshed.fresh, true);
   assert.deepEqual(
     refreshed.items.map((client) => client._id),
@@ -299,13 +420,13 @@ test('la búsqueda local encuentra por nombre y código sin distinguir acentos',
 
 test('la búsqueda local de productos exige todos los tokens en cualquier posición', async () => {
   await writeOfflineCatalogProducts(USER_A, [
-    makeProduct('p1', 'SH-400', 'Shampoo Capitalis 400ml'),
-    makeProduct('p2', 'SH-200', 'Shampoo Capitalis 200ml'),
+    makeProduct('p1', 'SH-400', 'Shampoo NovaFarma 400ml'),
+    makeProduct('p2', 'SH-200', 'Shampoo NovaFarma 200ml'),
   ]);
 
   const [byTokens, bySecondWord, missing] = await Promise.all([
     searchOfflineCatalogProducts(USER_A, 'shampoo 400'),
-    searchOfflineCatalogProducts(USER_A, 'capitalis'),
+    searchOfflineCatalogProducts(USER_A, 'novafarma'),
     searchOfflineCatalogProducts(USER_A, 'shampoo 500'),
   ]);
 
@@ -521,6 +642,304 @@ test('el prefetch completa clientes en lotes de hasta 200 hasta el tope de 500',
   assert.equal(calls.length, callsBeforeSecondRun);
 });
 
+test('el full sync guarda 1.200 productos y la búsqueda offline encuentra el 1.150', async (t) => {
+  const base = Date.now() - 1_200_000;
+  const products = Array.from({ length: 1_200 }, (_, index) =>
+    makeSyncProduct(index + 1, new Date(base + index).toISOString()),
+  );
+
+  const calls = stubFetch(t, (input) => {
+    const url = new URL(String(input), 'http://localhost');
+    assert.equal(url.pathname, '/api/catalog/offline-snapshot');
+
+    const type = url.searchParams.get('type');
+    const since = url.searchParams.get('since');
+    const offset = Number(url.searchParams.get('cursor') ?? '0');
+    const limit = Number(url.searchParams.get('limit') ?? '500');
+
+    if (type === 'clients') {
+      return jsonResponse({
+        success: true,
+        type,
+        items: [],
+        nextCursor: null,
+        hasMore: false,
+        serverTime: new Date().toISOString(),
+      });
+    }
+
+    const filtered = since ? products.filter((product) => product.updatedAt > since) : products;
+    const page = filtered.slice(offset, offset + limit);
+    const nextOffset = offset + page.length;
+
+    return jsonResponse({
+      success: true,
+      type,
+      items: page,
+      nextCursor: nextOffset < filtered.length ? String(nextOffset) : null,
+      hasMore: nextOffset < filtered.length,
+      serverTime: new Date().toISOString(),
+    });
+  });
+
+  const result = await syncOfflineCatalog(USER_A);
+
+  assert.equal(result.skipped, false);
+  assert.equal(result.fullSync, true);
+  assert.equal(result.products, 1_200);
+  assert.ok(
+    calls.some(
+      (call) =>
+        new URL(call.url, 'http://localhost').searchParams.get('type') === 'products' &&
+        new URL(call.url, 'http://localhost').searchParams.get('limit') === '500',
+    ),
+    'el full sync debe pedir páginas de hasta 500 productos',
+  );
+
+  const stored = await readOfflineCatalogProducts(USER_A);
+  assert.equal(stored.items.length, 1_200);
+
+  const found = await searchOfflineCatalogProducts(USER_A, 'SYNC-1150');
+  assert.equal(found.total, 1);
+  assert.equal(found.items[0]?._id, 'sync-product-1150');
+
+  const meta = await readOfflineCatalogMeta(USER_A);
+  assert.equal(meta.products?.count, 1_200);
+  assert.equal(typeof meta.products?.serverTime, 'string');
+});
+
+test('un delta con since sólo escribe los productos cambiados', async (t) => {
+  const base = Date.now() - 100_000;
+  const products = Array.from({ length: 30 }, (_, index) =>
+    makeSyncProduct(index + 1, new Date(base + index).toISOString()),
+  );
+
+  stubFetch(t, (input) => {
+    const url = new URL(String(input), 'http://localhost');
+    const type = url.searchParams.get('type');
+    const since = url.searchParams.get('since');
+    const offset = Number(url.searchParams.get('cursor') ?? '0');
+    const limit = Number(url.searchParams.get('limit') ?? '500');
+
+    if (type === 'clients') {
+      return jsonResponse({
+        success: true,
+        type,
+        items: [],
+        nextCursor: null,
+        hasMore: false,
+        serverTime: new Date().toISOString(),
+      });
+    }
+
+    const filtered = since ? products.filter((product) => product.updatedAt > since) : products;
+    const page = filtered.slice(offset, offset + limit);
+    const nextOffset = offset + page.length;
+
+    return jsonResponse({
+      success: true,
+      type,
+      items: page,
+      nextCursor: nextOffset < filtered.length ? String(nextOffset) : null,
+      hasMore: nextOffset < filtered.length,
+      serverTime: new Date().toISOString(),
+    });
+  });
+
+  await syncOfflineCatalog(USER_A);
+  const metaBefore = await readOfflineCatalogMeta(USER_A);
+  const before = await readRawCatalogRecord(
+    OFFLINE_CATALOG_STORE_NAMES.products,
+    offlineCatalogRecordKey(USER_A, 'sync-product-1'),
+  );
+  assert.ok(before);
+
+  products[9] = {
+    ...products[9],
+    name: 'Producto cambiado por delta',
+    updatedAt: new Date(Date.now() + 60_000).toISOString(),
+  };
+  await sleep(2);
+
+  const result = await syncOfflineCatalog(USER_A);
+  assert.equal(result.skipped, false);
+  assert.equal(result.fullSync, false);
+
+  const afterUnchanged = await readRawCatalogRecord(
+    OFFLINE_CATALOG_STORE_NAMES.products,
+    offlineCatalogRecordKey(USER_A, 'sync-product-1'),
+  );
+  const afterChanged = await readRawCatalogRecord(
+    OFFLINE_CATALOG_STORE_NAMES.products,
+    offlineCatalogRecordKey(USER_A, 'sync-product-10'),
+  );
+
+  assert.equal(afterUnchanged?.savedAt, before?.savedAt);
+  assert.equal(afterChanged?.data.name, 'Producto cambiado por delta');
+  assert.ok((afterChanged?.savedAt ?? 0) > (before?.savedAt ?? 0));
+
+  const metaAfter = await readOfflineCatalogMeta(USER_A);
+  assert.equal(metaAfter.products?.count, 30);
+  assert.notEqual(metaAfter.products?.serverTime, metaBefore.products?.serverTime);
+});
+
+test('una escritura incremental no reescribe los 5.000 productos existentes', async () => {
+  const config = buildOfflineCatalogConfig({ limits: { products: 5_000 } });
+  const existing = Array.from({ length: 5_000 }, (_, index) =>
+    makeProduct(`bulk-${index}`, `BULK-${index}`, `Producto bulk ${index}`),
+  );
+  const extra = Array.from({ length: 30 }, (_, index) =>
+    makeProduct(`extra-${index}`, `EXTRA-${index}`, `Producto extra ${index}`),
+  );
+
+  await writeOfflineCatalogProducts(USER_A, existing, config);
+
+  const puts = await countObjectStorePuts(OFFLINE_CATALOG_STORE_NAMES.products, async () => {
+    await writeOfflineCatalogProducts(USER_A, extra, config);
+  });
+
+  assert.equal(puts, extra.length, 'sólo se escriben los 30 registros nuevos');
+  assert.ok(puts < existing.length, 'la escritura no debe reescribir todo el snapshot');
+
+  const stored = await readOfflineCatalogProducts(USER_A, config);
+  assert.equal(stored.items.length, 5_000);
+  assert.ok(stored.items.some((product) => product._id === 'extra-0'));
+  assert.equal(
+    stored.items.filter((product) => product._id.startsWith('extra-')).length,
+    extra.length,
+  );
+});
+
+test('la caché en memoria se invalida al escribir y al cambiar de usuario', async () => {
+  await writeOfflineCatalogClients(USER_A, [makeClient('a1', 'CLI-A', 'Cliente A')]);
+
+  // La primera lectura puebla la caché; la segunda debe reutilizarla.
+  assert.equal((await readOfflineCatalogClients(USER_A)).items[0]?.name, 'Cliente A');
+  assert.equal((await readOfflineCatalogClients(USER_A)).items[0]?.name, 'Cliente A');
+
+  await writeOfflineCatalogClients(USER_A, [makeClient('a1', 'CLI-A', 'Cliente A actualizado')]);
+  assert.equal(
+    (await readOfflineCatalogClients(USER_A)).items[0]?.name,
+    'Cliente A actualizado',
+    'la escritura debe invalidar la entrada cacheada',
+  );
+
+  await writeOfflineCatalogClients(USER_B, [makeClient('b1', 'CLI-B', 'Cliente B')]);
+  const [clientsA, clientsB, clientsAAgain] = await Promise.all([
+    readOfflineCatalogClients(USER_A),
+    readOfflineCatalogClients(USER_B),
+    readOfflineCatalogClients(USER_A),
+  ]);
+
+  assert.equal(clientsA.items[0]?.name, 'Cliente A actualizado');
+  assert.deepEqual(
+    clientsB.items.map((client) => client._id),
+    ['b1'],
+  );
+  assert.equal(
+    clientsAAgain.items[0]?.name,
+    'Cliente A actualizado',
+    'la caché de un usuario no debe contaminar la de otro',
+  );
+});
+
+test('20 búsquedas consecutivas sobre 5.000 productos usan la caché en memoria', async () => {
+  const config = buildOfflineCatalogConfig({ limits: { products: 5_000 } });
+  const products = Array.from({ length: 5_000 }, (_, index) =>
+    makeProduct(`bench-${index}`, `BENCH-${index}`, `Producto bench ${index}`),
+  );
+  await writeOfflineCatalogProducts(USER_A, products, config);
+
+  // La primera búsqueda paga la lectura de IndexedDB y el índice normalizado.
+  const warmup = await searchOfflineCatalogProducts(USER_A, 'bench 4999', { config });
+  assert.equal(warmup.total, 1);
+
+  const terms = Array.from({ length: 20 }, (_, index) => `bench ${4_900 + index}`);
+  const startedAt = Date.now();
+  for (const term of terms) {
+    const result = await searchOfflineCatalogProducts(USER_A, term, { config, limit: 30 });
+    assert.equal(result.total, 1);
+  }
+  const elapsedMs = Date.now() - startedAt;
+  const budgetMs = Number(process.env.OFFLINE_CATALOG_SEARCH_BUDGET_MS ?? 80);
+  const averageMs = elapsedMs / terms.length;
+
+  assert.ok(
+    averageMs < budgetMs,
+    `las búsquedas cacheadas tardaron ${averageMs.toFixed(2)} ms en promedio (tope ${budgetMs} ms)`,
+  );
+});
+
+test('saveData=true no dispara el full sync automático', async (t) => {
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { onLine: true, connection: { saveData: true } },
+  });
+
+  t.after(() => {
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator);
+    else delete (globalThis as { navigator?: unknown }).navigator;
+  });
+
+  const calls = stubFetch(t, (input) => {
+    const type = new URL(String(input), 'http://localhost').searchParams.get('type') ?? 'products';
+    return jsonResponse({
+      success: true,
+      type,
+      items: [],
+      nextCursor: null,
+      hasMore: false,
+      serverTime: new Date().toISOString(),
+    });
+  });
+
+  assert.equal(shouldAutoSyncOfflineCatalog(), false);
+
+  const result = await syncOfflineCatalog(USER_A);
+  assert.equal(result.skipped, true);
+  assert.equal(result.reason, 'save-data');
+  assert.equal(calls.length, 0);
+
+  // La actualización manual (botón “Actualizar ahora”) sí puede correr.
+  const manual = await syncOfflineCatalog(USER_A, { force: true });
+  assert.equal(manual.skipped, false);
+  assert.ok(calls.length > 0);
+
+  const stored = await readOfflineCatalogProducts(USER_A);
+  assert.deepEqual(stored.items, []);
+});
+
+test('el sync automático se limita a un delta por minuto cuando ya hay serverTime', async (t) => {
+  const calls = stubFetch(t, (input) => {
+    const type = new URL(String(input), 'http://localhost').searchParams.get('type') ?? 'products';
+    return jsonResponse({
+      success: true,
+      type,
+      items: [],
+      nextCursor: null,
+      hasMore: false,
+      serverTime: new Date().toISOString(),
+    });
+  });
+
+  const first = await syncOfflineCatalog(USER_A, { auto: true });
+  assert.equal(first.skipped, false);
+  assert.equal(first.fullSync, true);
+
+  const callsAfterFirst = calls.length;
+  const throttled = await syncOfflineCatalog(USER_A, { auto: true });
+  assert.equal(throttled.skipped, true);
+  assert.equal(throttled.reason, 'throttled');
+  assert.equal(calls.length, callsAfterFirst, 'el throttle no debe pedir otra página');
+  assert.equal(MIN_AUTO_DELTA_INTERVAL_MS, 60_000);
+
+  // La actualización manual (botón “Actualizar ahora”) no queda bloqueada.
+  const manual = await syncOfflineCatalog(USER_A, { force: true });
+  assert.equal(manual.skipped, false);
+  assert.ok(calls.length > callsAfterFirst);
+});
+
 test('los clientes recientes se ordenan por frecuencia, se limitan a 5 y no se mezclan', async () => {
   const config = buildOfflineCatalogConfig({ limits: { recentClients: 5 } });
   const clients = Array.from({ length: 6 }, (_, index) =>
@@ -550,6 +969,50 @@ test('los clientes recientes se ordenan por frecuencia, se limitan a 5 y no se m
 
   const otherUser = await readOfflineRecentClients(USER_B, config);
   assert.deepEqual(otherUser.items, []);
+});
+
+test('guarda y lee el último pedido por cliente para repetirlo offline', async () => {
+  const order = makeLastOrder('order-1', 'client-1');
+
+  await rememberOfflineClientLastOrder(USER_A, 'client-1', order);
+
+  const [stored, missing, otherUser] = await Promise.all([
+    readOfflineClientLastOrder(USER_A, 'client-1'),
+    readOfflineClientLastOrder(USER_A, 'client-2'),
+    readOfflineClientLastOrder(USER_B, 'client-1'),
+  ]);
+
+  assert.equal(stored?._id, 'order-1');
+  assert.equal(stored?.invoiceType, 'B');
+  assert.equal(stored?.paymentCondition, 'cuenta_corriente');
+  assert.equal(stored?.paymentConditionDetail, undefined);
+  assert.deepEqual(
+    stored?.items.map((item) => item.productId),
+    ['product-1'],
+  );
+  assert.equal(missing, null);
+  assert.equal(otherUser, null, 'el último pedido no se comparte entre usuarios');
+});
+
+test('el último pedido por cliente vence y se puede limpiar sin tocar el catálogo', async () => {
+  await rememberOfflineClientLastOrder(USER_A, 'client-1', makeLastOrder('order-1', 'client-1'));
+  await writeOfflineCatalogClients(USER_A, [makeClient('c1', 'CLI-1', 'Farmacia Uno')]);
+
+  const expired = await readOfflineClientLastOrder(USER_A, 'client-1', -1);
+  assert.equal(expired, null);
+
+  await clearOfflineClientLastOrdersForUser(USER_A);
+  assert.equal(await readOfflineClientLastOrder(USER_A, 'client-1'), null);
+  assert.equal((await readOfflineCatalogClients(USER_A)).items[0]?._id, 'c1');
+});
+
+test('el logout borra los últimos pedidos además del catálogo', async () => {
+  await rememberOfflineClientLastOrder(USER_A, 'client-1', makeLastOrder('order-1', 'client-1'));
+
+  await clearUserOfflineData({ userId: USER_A });
+
+  assert.equal(await readOfflineClientLastOrder(USER_A, 'client-1'), null);
+  assert.deepEqual((await readOfflineCatalogClients(USER_A)).items, []);
 });
 
 test('limpiar un usuario no toca al otro y el borrado total vacía la base', async () => {

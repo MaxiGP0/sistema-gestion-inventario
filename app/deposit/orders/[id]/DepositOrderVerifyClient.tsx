@@ -23,6 +23,7 @@ import StatusBadge from '@/components/StatusBadge';
 import Button from '@/components/ui/Button';
 import Card from '@/components/ui/Card';
 import EmptyState from '@/components/ui/EmptyState';
+import FilterChips from '@/components/ui/FilterChips';
 import Modal from '@/components/ui/Modal';
 import QuantityStepper from '@/components/ui/QuantityStepper';
 import ProductThumbnail from '@/components/ProductThumbnail';
@@ -41,11 +42,14 @@ import OrderPrintLink from '@/components/orders/OrderPrintLink';
 import OrderShareButtons from '@/components/orders/OrderShareButtons';
 import OrderStaleVersionBanner from '@/components/orders/OrderStaleVersionBanner';
 import OfflineCatalogBadge from '@/components/orders/new/OfflineCatalogBadge';
+import KeepAwakeToggle from '@/components/KeepAwakeToggle';
 import { useOrderDetail } from '@/hooks/useOrderDetail';
 import { useMobileKeyboardFocus } from '@/hooks/useVisualViewport';
+import { vibrateOnTap } from '@/lib/haptics';
 import { orderVersion } from '@/lib/order-live-sync';
 import {
   countOrderLineFilters,
+  extractOrderLineBrands,
   filterOrderLines,
   type OrderLineFilter,
 } from '@/lib/order-line-filter';
@@ -67,6 +71,7 @@ import {
 } from '@/lib/picking-control';
 import {
   clearPickingAutosave,
+  clearPickingAutosaveComment,
   loadPickingAutosave,
   savePickingAutosave,
   type PickingAutosaveSnapshot,
@@ -74,15 +79,21 @@ import {
 import { getOrdersTrayBackHref } from '@/lib/orders-tray';
 import { markOrdersTrayForRefresh } from '@/lib/orders-tray-refresh';
 import {
+  appendDepositCatalogProducts,
   buildDepositAddedItem,
   depositLineTotal,
+  describeDepositCatalogProduct,
   findDepositItemByProductId,
   isDepositAddedLine,
   normalizeDepositAddQuantity,
   planDepositExistingAddition,
 } from '@/lib/deposit-add-product';
-import { searchOfflineCatalogProducts } from '@/lib/offline-catalog';
-import { isBrowserOffline, rememberOfflineCatalogProducts } from '@/lib/offline-catalog-sync';
+import { readOfflineCatalogBrands, searchOfflineCatalogProducts } from '@/lib/offline-catalog';
+import {
+  isBrowserOffline,
+  rememberOfflineCatalogBrands,
+  rememberOfflineCatalogProducts,
+} from '@/lib/offline-catalog-sync';
 import {
   enqueuePendingOrderPut,
   getPendingOrderPuts,
@@ -90,12 +101,20 @@ import {
 } from '@/lib/offline-order-queue';
 import { isRetriableOrderPutStatus } from '@/lib/order-put-sync-core';
 import { requestOrderPutBackgroundSync } from '@/lib/order-put-sync';
-import { apiRequest, ApiClientError, isAbortError, isNetworkError } from '@/lib/api-client';
+import {
+  apiRequest,
+  ApiClientError,
+  isAbortError,
+  isNetworkError,
+  isTimeoutError,
+} from '@/lib/api-client';
 import { getCatalog } from '@/lib/catalog-query-cache';
 import { useCatalogFocusRevalidation } from '@/hooks/useCatalogFocusRevalidation';
 import { useLatestRequest } from '@/hooks/useLatestRequest';
 import type { UserRole } from '@/lib/authz';
 import type {
+  BrandDTO,
+  BrandListResponse,
   OrderDTO,
   OrderItemDTO,
   OrderMutationResponse,
@@ -110,6 +129,9 @@ type Order = Omit<OrderDTO, 'items'> & { items: OrderItem[] };
 
 type ProductCatalog = ProductDTO;
 
+/** Tamaño de página del catálogo del modal "Agregar Producto". */
+const CATALOG_PAGE_SIZE = 30;
+
 /** localStorage puede no estar disponible (SSR o modo privado). */
 function resolveLocalStorage(): Storage | null {
   if (typeof window === 'undefined') return null;
@@ -118,6 +140,26 @@ function resolveLocalStorage(): Storage | null {
   } catch {
     return null;
   }
+}
+
+/** ¿El snapshot local difiere del control que ya está en el servidor? */
+function pickingStatesDiffer(current: PickingState, saved: PickingState): boolean {
+  const keys = new Set([...Object.keys(current), ...Object.keys(saved)]);
+
+  for (const key of keys) {
+    const left = current[key];
+    const right = saved[key];
+    if (!left || !right) return true;
+    if (
+      left.verifiedQty !== right.verifiedQty ||
+      left.controlled !== right.controlled ||
+      left.pendingReason !== right.pendingReason
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 interface DepositOrderVerifyClientProps {
@@ -161,7 +203,14 @@ export default function DepositOrderVerifyClient({
   );
   const [autosaveReady, setAutosaveReady] = useState(false);
   const autosaveCheckedForRef = useRef<string | null>(null);
+  const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Comentario que no pudo enviarse por falta de red/timeout. Vive también en
+  // el snapshot local para mostrarse al reabrir el pedido.
+  const [pendingComment, setPendingComment] = useState('');
+  const [retryingComment, setRetryingComment] = useState(false);
+  const retryingCommentRef = useRef(false);
   const [lineFilter, setLineFilter] = useState<OrderLineFilter>('all');
+  const [lineBrandFilter, setLineBrandFilter] = useState('all');
   const [lineSearch, setLineSearch] = useState('');
   const [pinnedItemKey, setPinnedItemKey] = useState<string | null>(null);
   const [isNavigating, startTransition] = useTransition();
@@ -169,7 +218,12 @@ export default function DepositOrderVerifyClient({
 
   // Estados para agregar productos adicionales
   const [catalogProducts, setCatalogProducts] = useState<ProductCatalog[]>([]);
+  const [catalogBrands, setCatalogBrands] = useState<BrandDTO[]>([]);
+  const [catalogPage, setCatalogPage] = useState(1);
+  const [hasMoreCatalog, setHasMoreCatalog] = useState(false);
+  const [selectedAddBrandId, setSelectedAddBrandId] = useState('all');
   const [loadingCatalog, setLoadingCatalog] = useState(false);
+  const [loadingMoreCatalog, setLoadingMoreCatalog] = useState(false);
   const [catalogFromCache, setCatalogFromCache] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
   const [itemToRemove, setItemToRemove] = useState<{
@@ -200,13 +254,30 @@ export default function DepositOrderVerifyClient({
         setQuickUndo(null);
         setRestorableSnapshot(null);
         setAutosaveReady(true);
+
+        // El comentario pendiente no se pierde cuando otra persona avanzó la
+        // versión: se reasocia a la versión vigente para reabrir el pedido.
+        const comment = pendingComment.trim();
+        if (comment) {
+          savePickingAutosave(resolveLocalStorage(), {
+            orderId: remote._id,
+            userId,
+            version: orderVersion(remote),
+            savedAt: Date.now(),
+            items: {},
+            pendingComment: comment,
+          });
+        }
+
         showToast('Pedido actualizado', 'success');
       },
       onRemoteMetadataMerged: (merged, previous) => {
         // Un comentario de otra persona avanzó la versión: el autosave en curso
         // debe quedar asociado a esa versión para poder restaurarse después.
         if (!previous || orderVersion(merged) <= orderVersion(previous)) return;
-        if (!hasLocalPickingChangesRef.current) return;
+
+        const comment = pendingComment.trim();
+        if (!hasLocalPickingChangesRef.current && !comment) return;
 
         savePickingAutosave(resolveLocalStorage(), {
           orderId: merged._id,
@@ -214,6 +285,7 @@ export default function DepositOrderVerifyClient({
           version: orderVersion(merged),
           savedAt: Date.now(),
           items: itemsState,
+          ...(comment ? { pendingComment: comment } : {}),
         });
       },
     });
@@ -243,88 +315,374 @@ export default function DepositOrderVerifyClient({
     });
 
     if (snapshot) {
-      setRestorableSnapshot(snapshot);
-      setAutosaveReady(false);
+      // Un comentario pendiente solo no debe mostrar el banner de "control sin
+      // guardar": se compara el snapshot con lo que ya está en el servidor.
+      const hasPickingChanges =
+        Object.keys(snapshot.items).length > 0 &&
+        pickingStatesDiffer(buildPickingState(order.items), snapshot.items);
+
+      setRestorableSnapshot(hasPickingChanges ? snapshot : null);
+      setAutosaveReady(!hasPickingChanges);
+
+      if (snapshot.pendingComment) {
+        setPendingComment(snapshot.pendingComment);
+        setNewComment((current) => current || snapshot.pendingComment!);
+      }
     } else {
       setAutosaveReady(true);
     }
   }, [order, userId]);
+
+  const savePickingSnapshotNow = useCallback(() => {
+    if (!order || !autosaveReady || !hasLocalPickingChangesRef.current) return false;
+
+    const comment = pendingComment.trim();
+    return savePickingAutosave(resolveLocalStorage(), {
+      orderId: order._id,
+      userId,
+      version: order.version ?? 0,
+      savedAt: Date.now(),
+      items: itemsState,
+      ...(comment ? { pendingComment: comment } : {}),
+    });
+  }, [autosaveReady, itemsState, order, pendingComment, userId]);
+
+  const cancelAutosaveTimer = useCallback(() => {
+    if (autosaveTimerRef.current !== null) {
+      clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    }
+  }, []);
+
+  /** Escribe ya el picking (localStorage es sincrónico) sin esperar 500 ms. */
+  const flushPickingAutosave = useCallback(() => {
+    cancelAutosaveTimer();
+    return savePickingSnapshotNow();
+  }, [cancelAutosaveTimer, savePickingSnapshotNow]);
 
   useEffect(() => {
     // No guardar un control intacto: al reabrir el pedido no debe ofrecerse
     // restaurar un snapshot idéntico al que ya está en el servidor.
     if (!order || !autosaveReady || !hasLocalPickingChangesRef.current) return;
 
-    const timer = setTimeout(() => {
-      savePickingAutosave(resolveLocalStorage(), {
+    cancelAutosaveTimer();
+    autosaveTimerRef.current = setTimeout(() => {
+      autosaveTimerRef.current = null;
+      savePickingSnapshotNow();
+    }, 500);
+
+    return cancelAutosaveTimer;
+  }, [
+    autosaveReady,
+    cancelAutosaveTimer,
+    itemsState,
+    order,
+    pendingComment,
+    savePickingSnapshotNow,
+    userId,
+  ]);
+
+  // Al cerrar la pestaña o cambiar de app se escribe el último cambio antes de
+  // que el navegador congele el JavaScript. No guarda si no hubo ediciones.
+  useEffect(() => {
+    const onPageHide = () => {
+      flushPickingAutosave();
+    };
+    const onVisibilityChange = () => {
+      if (document.hidden) flushPickingAutosave();
+    };
+
+    window.addEventListener('pagehide', onPageHide);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      window.removeEventListener('pagehide', onPageHide);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [flushPickingAutosave]);
+
+  /** Guarda un comentario que no pudo enviarse, junto con el picking actual. */
+  const persistPendingComment = useCallback(
+    (text: string) => {
+      if (!order) return false;
+
+      const comment = text.trim();
+      if (!comment) return false;
+
+      const saved = savePickingAutosave(resolveLocalStorage(), {
         orderId: order._id,
         userId,
         version: order.version ?? 0,
         savedAt: Date.now(),
         items: itemsState,
+        pendingComment: comment,
       });
-    }, 500);
 
-    return () => clearTimeout(timer);
-  }, [autosaveReady, itemsState, order, userId]);
+      if (saved) setPendingComment(comment);
+      return saved;
+    },
+    [itemsState, order, userId],
+  );
 
-  const loadCatalog = useCallback(async () => {
-    // Cancela la búsqueda anterior y usa el id como segunda barrera.
-    const ticket = catalogRequest.start();
-    setLoadingCatalog(true);
+  const clearPendingComment = useCallback(() => {
+    clearPickingAutosaveComment(resolveLocalStorage(), userId, id);
+    setPendingComment('');
+  }, [id, userId]);
 
-    const loadLocal = async (): Promise<boolean> => {
-      try {
-        const snapshot = await searchOfflineCatalogProducts(userId, productSearch.trim(), {
-          limit: 30,
-        });
-        if (!catalogRequest.isCurrent(ticket)) return false;
+  // Si el operario edita el texto después de un fallo, el snapshot conserva la
+  // última versión para reabrirla tal cual.
+  useEffect(() => {
+    if (!pendingComment) return;
 
-        if (snapshot.total > 0 || snapshot.expired > 0 || isBrowserOffline()) {
-          setCatalogProducts(snapshot.items as ProductCatalog[]);
-          setCatalogFromCache(true);
-        }
-        return snapshot.total > 0;
-      } catch (error) {
-        console.error('Error buscando productos guardados:', error);
+    const edited = newComment.trim();
+    if (!edited || edited === pendingComment) return;
+
+    persistPendingComment(edited);
+  }, [newComment, pendingComment, persistPendingComment]);
+
+  /**
+   * Reenvía el comentario que quedó en el autosave local. No toca las líneas:
+   * sólo actualiza versión/comentarios y reasocia el snapshot del picking a la
+   * versión nueva para que siga siendo restaurable si había cambios sin guardar.
+   */
+  const retryPendingComment = useCallback(
+    async (options?: { announceFailure?: boolean }): Promise<boolean> => {
+      const comment = pendingComment.trim();
+      if (!order || !comment || retryingCommentRef.current || submitting || savingComment) {
         return false;
       }
+
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        if (options?.announceFailure) {
+          showToast(
+            'Sin conexión: el comentario sigue guardado en este dispositivo. Reintentá cuando vuelva la señal.',
+            'error',
+            7000,
+          );
+        }
+        return false;
+      }
+
+      retryingCommentRef.current = true;
+      setRetryingComment(true);
+
+      try {
+        const data = await apiRequest<OrderMutationResponse>(`/api/orders/${id}`, {
+          method: 'PUT',
+          body: {
+            version: order.version ?? 0,
+            comment,
+          },
+        });
+
+        const nextVersion = data.order.version ?? order.version ?? 0;
+        setOrder((prev) =>
+          prev
+            ? {
+                ...prev,
+                version: nextVersion,
+                comments: data.order.comments ?? [
+                  ...(prev.comments ?? []),
+                  {
+                    text: comment,
+                    author: prev.createdBy,
+                    role: 'deposit',
+                    createdAt: new Date().toISOString(),
+                  },
+                ],
+              }
+            : prev,
+        );
+
+        // El comentario avanzó la versión: el control en curso debe quedar
+        // asociado a esa versión para poder restaurarse al reabrir el pedido.
+        if (hasLocalPickingChangesRef.current) {
+          savePickingAutosave(resolveLocalStorage(), {
+            orderId: order._id,
+            userId,
+            version: nextVersion,
+            savedAt: Date.now(),
+            items: itemsState,
+          });
+        }
+
+        clearPendingComment();
+        setNewComment((current) => (current.trim() === comment ? '' : current));
+        showToast('Comentario pendiente sincronizado.', 'success');
+        return true;
+      } catch (err: unknown) {
+        if (!isNetworkError(err)) {
+          showToast(
+            err instanceof Error ? err.message : 'No se pudo sincronizar el comentario pendiente.',
+            'error',
+          );
+        } else if (options?.announceFailure) {
+          showToast(
+            isTimeoutError(err)
+              ? 'La conexión tardó demasiado: el comentario sigue guardado en este dispositivo.'
+              : 'Sin conexión: el comentario sigue guardado en este dispositivo.',
+            'error',
+            7000,
+          );
+        }
+        return false;
+      } finally {
+        retryingCommentRef.current = false;
+        setRetryingComment(false);
+      }
+    },
+    [
+      clearPendingComment,
+      id,
+      itemsState,
+      order,
+      pendingComment,
+      savingComment,
+      setOrder,
+      showToast,
+      submitting,
+      userId,
+    ],
+  );
+
+  useEffect(() => {
+    const onOnline = () => {
+      void retryPendingComment();
     };
 
-    // 1) Hidratar desde IndexedDB: si hay red, estos resultados se ven al
-    // instante y la respuesta del servidor los reemplaza después.
-    const hadCachedResults = await loadLocal();
-    if (!catalogRequest.isCurrent(ticket)) return;
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
+  }, [retryPendingComment]);
 
-    if (isBrowserOffline() || hadCachedResults) setLoadingCatalog(false);
-    if (isBrowserOffline()) return;
+  /**
+   * Carga una página del catálogo del modal. La página 1 reemplaza la lista;
+   * las siguientes se anexan sin duplicar productos. Si no hay red (o falla el
+   * servidor) se pagina el snapshot de IndexedDB con el mismo `offset`.
+   */
+  const loadCatalogPage = useCallback(
+    async (targetPage: number, options: { append?: boolean } = {}) => {
+      const append = options.append ?? false;
+      // Cancela la búsqueda anterior y usa el id como segunda barrera.
+      const ticket = catalogRequest.start();
+      const brandId = selectedAddBrandId === 'all' ? undefined : selectedAddBrandId;
+      const offset = (targetPage - 1) * CATALOG_PAGE_SIZE;
 
-    try {
-      const params = new URLSearchParams({ limit: '30' });
-      if (productSearch.trim()) params.set('search', productSearch.trim());
+      if (append) setLoadingMoreCatalog(true);
+      else setLoadingCatalog(true);
 
-      const data = await getCatalog<ProductListResponse>(`/api/products?${params.toString()}`, {
-        signal: ticket.signal,
-        // La copia local ya se mostró: revalidar siempre contra el servidor.
-        force: true,
-      });
+      const loadLocalPage = async (): Promise<boolean> => {
+        try {
+          const snapshot = await searchOfflineCatalogProducts(userId, productSearch.trim(), {
+            limit: CATALOG_PAGE_SIZE,
+            offset,
+            ...(brandId ? { brandId } : {}),
+          });
+          if (!catalogRequest.isCurrent(ticket)) return false;
 
-      // Descartar respuestas obsoletas (peticiones reemplazadas o canceladas).
+          if (snapshot.total > 0 || snapshot.expired > 0 || isBrowserOffline()) {
+            setCatalogProducts((current) =>
+              append
+                ? appendDepositCatalogProducts(current, snapshot.items as ProductCatalog[])
+                : (snapshot.items as ProductCatalog[]),
+            );
+            setCatalogPage(targetPage);
+            setHasMoreCatalog(offset + snapshot.items.length < snapshot.total);
+            setCatalogFromCache(true);
+          }
+          return snapshot.total > 0 || snapshot.items.length > 0;
+        } catch (error) {
+          console.error('Error buscando productos guardados:', error);
+          return false;
+        }
+      };
+
+      if (append) {
+        // Sin red no hay servidor que consultar: se avanza sobre la copia local.
+        if (isBrowserOffline()) {
+          await loadLocalPage();
+          setLoadingMoreCatalog(false);
+          return;
+        }
+
+        try {
+          const params = new URLSearchParams({
+            page: String(targetPage),
+            limit: String(CATALOG_PAGE_SIZE),
+          });
+          if (productSearch.trim()) params.set('search', productSearch.trim());
+          if (brandId) params.set('brandId', brandId);
+
+          const data = await getCatalog<ProductListResponse>(`/api/products?${params.toString()}`, {
+            signal: ticket.signal,
+            force: true,
+          });
+
+          if (!catalogRequest.isCurrent(ticket)) return;
+
+          setCatalogProducts((current) => appendDepositCatalogProducts(current, data.products));
+          setCatalogPage(targetPage);
+          setHasMoreCatalog(data.hasMore);
+          setCatalogFromCache(false);
+          rememberOfflineCatalogProducts(userId, data.products);
+        } catch (err) {
+          if (isAbortError(err) || !catalogRequest.isCurrent(ticket)) return;
+          console.error('Error cargando más productos:', err);
+          // Red caída con navigator.onLine todavía en true: se sigue con la
+          // copia local en la página equivalente.
+          await loadLocalPage();
+        } finally {
+          if (catalogRequest.isCurrent(ticket)) setLoadingMoreCatalog(false);
+        }
+        return;
+      }
+
+      // 1) Hidratar desde IndexedDB: si hay red, estos resultados se ven al
+      // instante y la respuesta del servidor los reemplaza después.
+      const hadCachedResults = await loadLocalPage();
       if (!catalogRequest.isCurrent(ticket)) return;
 
-      setCatalogProducts(data.products);
-      setCatalogFromCache(false);
-      rememberOfflineCatalogProducts(userId, data.products);
-    } catch (err) {
-      if (isAbortError(err) || !catalogRequest.isCurrent(ticket)) return;
-      console.error('Error cargando catálogo:', err);
-      // Red caída con navigator.onLine todavía en true: se queda la copia
-      // local con el aviso visible.
-      if (!hadCachedResults) await loadLocal();
-    } finally {
-      if (catalogRequest.isCurrent(ticket)) setLoadingCatalog(false);
-    }
-  }, [catalogRequest, productSearch, userId]);
+      if (isBrowserOffline() || hadCachedResults) setLoadingCatalog(false);
+      if (isBrowserOffline()) return;
+
+      try {
+        const params = new URLSearchParams({
+          page: '1',
+          limit: String(CATALOG_PAGE_SIZE),
+        });
+        if (productSearch.trim()) params.set('search', productSearch.trim());
+        if (brandId) params.set('brandId', brandId);
+
+        const data = await getCatalog<ProductListResponse>(`/api/products?${params.toString()}`, {
+          signal: ticket.signal,
+          // La copia local ya se mostró: revalidar siempre contra el servidor.
+          force: true,
+        });
+
+        // Descartar respuestas obsoletas (peticiones reemplazadas o canceladas).
+        if (!catalogRequest.isCurrent(ticket)) return;
+
+        setCatalogProducts(data.products);
+        setCatalogPage(1);
+        setHasMoreCatalog(data.hasMore);
+        setCatalogFromCache(false);
+        rememberOfflineCatalogProducts(userId, data.products);
+      } catch (err) {
+        if (isAbortError(err) || !catalogRequest.isCurrent(ticket)) return;
+        console.error('Error cargando catálogo:', err);
+        // Red caída con navigator.onLine todavía en true: se queda la copia
+        // local con el aviso visible.
+        if (!hadCachedResults) await loadLocalPage();
+      } finally {
+        if (catalogRequest.isCurrent(ticket)) setLoadingCatalog(false);
+      }
+    },
+    [catalogRequest, productSearch, selectedAddBrandId, userId],
+  );
+
+  const loadMoreCatalog = useCallback(() => {
+    if (loadingCatalog || loadingMoreCatalog || !hasMoreCatalog) return;
+    void loadCatalogPage(catalogPage + 1, { append: true });
+  }, [catalogPage, hasMoreCatalog, loadCatalogPage, loadingCatalog, loadingMoreCatalog]);
 
   // Búsqueda del catálogo en el servidor (paginada) solo cuando el modal está abierto.
   useEffect(() => {
@@ -333,9 +691,12 @@ export default function DepositOrderVerifyClient({
       return;
     }
 
+    setCatalogPage(1);
+    setHasMoreCatalog(false);
+
     const timer = setTimeout(
       () => {
-        void loadCatalog();
+        void loadCatalogPage(1);
       },
       productSearch.trim() ? 300 : 0,
     );
@@ -345,13 +706,57 @@ export default function DepositOrderVerifyClient({
       // Cambió la búsqueda, se cerró el modal o se desmontó: cancelar ya.
       catalogRequest.abort();
     };
-  }, [showAddModal, productSearch, loadCatalog, catalogRequest]);
+  }, [showAddModal, productSearch, selectedAddBrandId, loadCatalogPage, catalogRequest]);
 
-  // Al volver a foco se revalida el catálogo si el modal sigue abierto.
+  // Marcas del catálogo para filtrar sin teclear: red con respaldo offline.
+  useEffect(() => {
+    if (!showAddModal) return;
+
+    let active = true;
+
+    const loadBrands = async () => {
+      if (isBrowserOffline()) {
+        try {
+          const cached = await readOfflineCatalogBrands(userId);
+          if (active && cached.items.length > 0) {
+            setCatalogBrands(cached.items as BrandDTO[]);
+          }
+        } catch (error) {
+          console.error('Error leyendo marcas guardadas:', error);
+        }
+        return;
+      }
+
+      try {
+        const data = await getCatalog<BrandListResponse>('/api/brands');
+        if (!active) return;
+        setCatalogBrands(data.brands);
+        rememberOfflineCatalogBrands(userId, data.brands);
+      } catch (error) {
+        console.error('Error cargando marcas:', error);
+        try {
+          const cached = await readOfflineCatalogBrands(userId);
+          if (active && cached.items.length > 0) {
+            setCatalogBrands(cached.items as BrandDTO[]);
+          }
+        } catch (cacheError) {
+          console.error('Error leyendo marcas guardadas:', cacheError);
+        }
+      }
+    };
+
+    void loadBrands();
+
+    return () => {
+      active = false;
+    };
+  }, [showAddModal, userId]);
+
+  // Al volver a foco se revalida la primera página si el modal sigue abierto.
   useCatalogFocusRevalidation(
     useCallback(() => {
-      if (showAddModal) void loadCatalog();
-    }, [showAddModal, loadCatalog]),
+      if (showAddModal) void loadCatalogPage(1);
+    }, [showAddModal, loadCatalogPage]),
   );
 
   // Refleja si este pedido tiene un picking esperando sincronización. Se
@@ -398,14 +803,19 @@ export default function DepositOrderVerifyClient({
    */
   const pinActiveLine = useCallback(
     (key: string) => {
-      setPinnedItemKey(lineFilter === 'all' ? null : key);
+      setPinnedItemKey(lineFilter === 'all' && lineBrandFilter === 'all' ? null : key);
     },
-    [lineFilter],
+    [lineBrandFilter, lineFilter],
   );
 
   const handleLineFilterChange = useCallback((next: OrderLineFilter) => {
     setPinnedItemKey(null);
     setLineFilter(next);
+  }, []);
+
+  const handleLineBrandFilterChange = useCallback((next: string) => {
+    setPinnedItemKey(null);
+    setLineBrandFilter(next);
   }, []);
 
   const handleLineSearchChange = useCallback((next: string) => {
@@ -423,12 +833,18 @@ export default function DepositOrderVerifyClient({
     },
   };
   const lineFilterCounts = countOrderLineFilters(order?.items ?? [], lineFilterPredicates);
+  const lineBrands = extractOrderLineBrands(order?.items ?? []);
   const showLineFilters = (order?.items.length ?? 0) > 5;
   const pinnedLineKeys = pinnedItemKey ? new Set([pinnedItemKey]) : undefined;
   const visibleItems = showLineFilters
     ? filterOrderLines(
         order?.items ?? [],
-        { filter: lineFilter, query: lineSearch, pinnedKeys: pinnedLineKeys },
+        {
+          filter: lineFilter,
+          brandName: lineBrandFilter,
+          query: lineSearch,
+          pinnedKeys: pinnedLineKeys,
+        },
         lineFilterPredicates,
         pickingItemKey,
       )
@@ -437,20 +853,23 @@ export default function DepositOrderVerifyClient({
   const clearAutosaveAfterSave = useCallback(() => {
     // Detiene el debounce antes de borrar para que el timer pendiente no
     // vuelva a escribir el snapshot durante la redirección.
+    cancelAutosaveTimer();
     setAutosaveReady(false);
     clearPickingAutosave(resolveLocalStorage(), userId, id);
-  }, [id, userId]);
+    setPendingComment('');
+  }, [cancelAutosaveTimer, id, userId]);
 
   /** Un cambio manual invalida el "Deshacer" masivo y descarta un snapshot viejo. */
   const markManualPickingEdit = useCallback(() => {
     hasLocalPickingChangesRef.current = true;
     setQuickUndo(null);
     if (restorableSnapshot) {
+      cancelAutosaveTimer();
       clearPickingAutosave(resolveLocalStorage(), userId, id);
       setRestorableSnapshot(null);
       setAutosaveReady(true);
     }
-  }, [id, restorableSnapshot, userId]);
+  }, [cancelAutosaveTimer, id, restorableSnapshot, userId]);
 
   /** El operario acepta descartar su pintura y seguir con la versión del servidor. */
   const handleLoadLatestVersion = useCallback(() => {
@@ -493,13 +912,30 @@ export default function DepositOrderVerifyClient({
   };
 
   const handleDiscardAutosave = () => {
+    cancelAutosaveTimer();
     clearPickingAutosave(resolveLocalStorage(), userId, id);
+
+    // Descartar el control no debe borrar un comentario que todavía no se
+    // envió: se conserva como snapshot mínimo para reabrirlo después.
+    const comment = pendingComment.trim();
+    if (order && comment) {
+      savePickingAutosave(resolveLocalStorage(), {
+        orderId: order._id,
+        userId,
+        version: order.version ?? 0,
+        savedAt: Date.now(),
+        items: {},
+        pendingComment: comment,
+      });
+    }
+
     setRestorableSnapshot(null);
     setAutosaveReady(true);
     showToast('Se descartó el control guardado en este dispositivo.', 'success');
   };
 
   const handleToggleControlled = (itemId: string) => {
+    vibrateOnTap();
     pinActiveLine(itemId);
     markManualPickingEdit();
     setItemsState((prev) => {
@@ -533,6 +969,7 @@ export default function DepositOrderVerifyClient({
    * Ajustar la cantidad también confirma el control de la línea.
    */
   const handleQtyDelta = (itemId: string, delta: number, requestedQuantity: number) => {
+    vibrateOnTap();
     pinActiveLine(itemId);
     markManualPickingEdit();
     setItemsState((prev) => ({
@@ -543,6 +980,7 @@ export default function DepositOrderVerifyClient({
 
   /** Atajo "= Solicitado": controla la línea completa en un solo toque. */
   const handleRequestedShortcut = (itemId: string, requestedQuantity: number) => {
+    vibrateOnTap();
     pinActiveLine(itemId);
     markManualPickingEdit();
     setItemsState((prev) => ({
@@ -553,6 +991,7 @@ export default function DepositOrderVerifyClient({
 
   /** Atajo "Sin stock": deja la línea pendiente y enfoca el motivo sugerido. */
   const handleOutOfStockShortcut = (itemId: string) => {
+    vibrateOnTap();
     pinActiveLine(itemId);
     markManualPickingEdit();
     setItemsState((prev) => ({
@@ -579,6 +1018,9 @@ export default function DepositOrderVerifyClient({
     setShowAddModal(false);
     setProductSearch('');
     setAddQuantity(1);
+    setSelectedAddBrandId('all');
+    setCatalogPage(1);
+    setHasMoreCatalog(false);
   }, []);
 
   const handleAddProductToOrder = (product: ProductCatalog, qtyToAdd: number) => {
@@ -685,7 +1127,25 @@ export default function DepositOrderVerifyClient({
 
     setSavingComment(true);
 
+    const saveLocally = (message: string) => {
+      const saved = persistPendingComment(commentText);
+      showToast(
+        saved
+          ? message
+          : 'No se pudo guardar el comentario localmente. Revisá el almacenamiento del navegador.',
+        saved ? 'success' : 'error',
+        7000,
+      );
+    };
+
     try {
+      if (isBrowserOffline()) {
+        saveLocally(
+          'Sin conexión: el comentario quedó guardado en este dispositivo y se enviará con el próximo guardado del picking.',
+        );
+        return;
+      }
+
       const data = await apiRequest<OrderMutationResponse>(`/api/orders/${id}`, {
         method: 'PUT',
         body: {
@@ -712,9 +1172,19 @@ export default function DepositOrderVerifyClient({
           : prev,
       );
 
+      clearPendingComment();
       setNewComment('');
       showToast('¡Comentario agregado exitosamente!', 'success');
     } catch (err: unknown) {
+      if (isNetworkError(err) || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+        saveLocally(
+          isTimeoutError(err)
+            ? 'La conexión tardó demasiado: el comentario quedó guardado en este dispositivo y se enviará con el próximo guardado del picking.'
+            : 'Sin conexión: el comentario quedó guardado en este dispositivo y se enviará con el próximo guardado del picking.',
+        );
+        return;
+      }
+
       showToast(err instanceof Error ? err.message : 'Error al guardar el comentario', 'error');
     } finally {
       setSavingComment(false);
@@ -757,7 +1227,8 @@ export default function DepositOrderVerifyClient({
     const payload = {
       items: updatedItems,
       status: targetStatus,
-      comment: newComment.trim(),
+      // Un comentario que falló por red viaja en el mismo PUT del picking.
+      comment: newComment.trim() || pendingComment.trim(),
       version: order.version ?? 0,
     };
 
@@ -776,6 +1247,7 @@ export default function DepositOrderVerifyClient({
         });
         setQueuedLocally(true);
         clearAutosaveAfterSave();
+        setNewComment('');
         void requestOrderPutBackgroundSync();
         showToast(message, 'success', 6000);
       } catch (queueError) {
@@ -803,6 +1275,7 @@ export default function DepositOrderVerifyClient({
 
       const nextStatus = data.order?.status ?? targetStatus;
       clearAutosaveAfterSave();
+      setNewComment('');
       if (data.order) {
         setOrder((prev) =>
           prev
@@ -921,6 +1394,7 @@ export default function DepositOrderVerifyClient({
           </div>
           <div className="flex w-full flex-wrap items-center gap-2 md:w-auto md:justify-end">
             <StatusBadge variant="deposit" status={order.status} />
+            <KeepAwakeToggle />
             <OrderShareButtons order={order} hideLabelOnMobile />
             <OrderPrintLink href={`/deposit/orders/${id}/print`} hideLabelOnMobile />
             <Button
@@ -1008,6 +1482,32 @@ export default function DepositOrderVerifyClient({
           </div>
         </Card>
 
+        {pendingComment && (
+          <div
+            className="flex items-center justify-between gap-3 rounded-lg border border-status-draft-border bg-status-draft-soft px-3 py-2"
+            data-testid="deposit-pending-comment"
+          >
+            <div className="min-w-0">
+              <p className="text-xs font-semibold text-status-draft">
+                Comentario pendiente de sincronizar
+              </p>
+              <p className="mt-0.5 text-[11px] text-status-draft">
+                Se enviará al recuperar la conexión o con el próximo guardado del picking.
+              </p>
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void retryPendingComment({ announceFailure: true })}
+              disabled={savingComment || submitting || retryingComment}
+              className="min-h-11 shrink-0 px-3"
+              data-testid="deposit-retry-comment"
+            >
+              {retryingComment ? 'Enviando...' : 'Reintentar ahora'}
+            </Button>
+          </div>
+        )}
+
         {/* Comentarios y Observaciones */}
         <CommentsPanel
           comments={order.comments}
@@ -1015,7 +1515,7 @@ export default function DepositOrderVerifyClient({
           onChange={setNewComment}
           variant="deposit"
           onSubmit={handleSaveComment}
-          submitting={savingComment || submitting}
+          submitting={savingComment || submitting || retryingComment}
         />
 
         {/* Tabla de ítems para verificar */}
@@ -1026,18 +1526,21 @@ export default function DepositOrderVerifyClient({
           </h3>
 
           {showLineFilters && (
-            <div className="mb-4 space-y-2" data-testid="deposit-line-filters">
+            <>
               <OrderLineFilters
                 counts={lineFilterCounts}
                 filter={lineFilter}
                 onFilterChange={handleLineFilterChange}
                 query={lineSearch}
                 onQueryChange={handleLineSearchChange}
+                brands={lineBrands}
+                brandFilter={lineBrandFilter}
+                onBrandFilterChange={handleLineBrandFilterChange}
               />
-              <p className="text-[10px] text-muted" role="status">
+              <p className="mb-4 mt-2 text-[10px] text-muted" role="status">
                 Mostrando {visibleItems.length} de {order.items.length} líneas
               </p>
-            </div>
+            </>
           )}
 
           <div className="space-y-4">
@@ -1070,7 +1573,9 @@ export default function DepositOrderVerifyClient({
                   <div
                     key={`mob-${key}`}
                     data-testid="deposit-item-card"
-                    className={`p-4 rounded-lg border transition ${
+                    className={`cv-list-item cv-deposit-card p-4 rounded-lg border transition ${
+                      pinnedItemKey === key ? 'cv-pinned ' : ''
+                    }${
                       state.controlled
                         ? 'bg-status-delivered-soft border-status-delivered-border'
                         : isRemoved
@@ -1267,7 +1772,9 @@ export default function DepositOrderVerifyClient({
                       return (
                         <TableRow
                           key={key}
-                          className={`transition ${
+                          className={`cv-list-item cv-table-row transition ${
+                            pinnedItemKey === key ? 'cv-pinned ' : ''
+                          }${
                             state.controlled
                               ? 'bg-status-delivered-soft hover:brightness-95'
                               : isRemoved
@@ -1504,6 +2011,25 @@ export default function DepositOrderVerifyClient({
           )}
         </div>
 
+        {catalogBrands.length > 1 && (
+          <FilterChips
+            ariaLabel="Filtrar catálogo por marca"
+            value={selectedAddBrandId}
+            onChange={setSelectedAddBrandId}
+            dataTestId="add-product-brand-filters"
+            itemTestIdPrefix="add-product-brand-"
+            className="mb-3"
+            items={[
+              { value: 'all', label: 'Todas', testId: 'add-product-brand-all' },
+              ...catalogBrands.map((brand, index) => ({
+                value: brand._id,
+                label: brand.name,
+                testId: `add-product-brand-${index}`,
+              })),
+            ]}
+          />
+        )}
+
         <div className="mb-4 rounded-lg border border-border bg-surface-muted p-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
@@ -1543,7 +2069,7 @@ export default function DepositOrderVerifyClient({
           <OfflineCatalogBadge className="mb-3" detail="catálogo de productos" />
         )}
 
-        <div className="max-h-72 divide-y divide-border space-y-1 overflow-y-auto">
+        <div className="max-h-72 touch-pan-y divide-y divide-border space-y-1 overflow-y-auto overscroll-contain">
           {loadingCatalog && catalogProducts.length === 0 ? (
             <div className="py-6 text-center text-xs text-muted">Cargando catálogo...</div>
           ) : catalogProducts.length === 0 ? (
@@ -1551,32 +2077,58 @@ export default function DepositOrderVerifyClient({
               No se encontraron productos para la búsqueda.
             </div>
           ) : (
-            catalogProducts.map((p) => (
-              <button
-                key={p._id}
-                type="button"
-                onClick={() => handleAddProductToOrder(p, addQuantity)}
-                className="flex w-full items-center gap-3 rounded-lg p-3 text-left text-xs text-foreground transition hover:bg-action-soft focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
-              >
-                <ProductThumbnail src={p.imageUrl} alt={p.name} size={44} className="shrink-0" />
-                <span className="min-w-0 flex-1">
-                  <span className="block break-words">
-                    <strong className="font-mono text-action-text">{p.code}</strong> - {p.name}
+            catalogProducts.map((p) => {
+              const presence = describeDepositCatalogProduct(order?.items ?? [], p._id);
+
+              return (
+                <button
+                  key={p._id}
+                  type="button"
+                  onClick={() => handleAddProductToOrder(p, addQuantity)}
+                  className="flex w-full items-center gap-3 rounded-lg p-3 text-left text-xs text-foreground transition hover:bg-action-soft focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+                >
+                  <ProductThumbnail src={p.imageUrl} alt={p.name} size={44} className="shrink-0" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block break-words">
+                      <strong className="font-mono text-action-text">{p.code}</strong> - {p.name}
+                    </span>
+                    <span className="mt-0.5 block text-[10px] text-muted">
+                      Marca: {p.brandId?.name} | s/IVA: ${p.price.toFixed(2)} | c/IVA: $
+                      {(p.priceWithIva || p.price * 1.21).toFixed(2)}
+                    </span>
+                    {presence.inOrder && (
+                      <span
+                        data-testid="add-product-in-order-badge"
+                        className="mt-1 inline-flex rounded-full border border-status-delivered-border bg-status-delivered-soft px-2 py-0.5 text-[10px] font-semibold text-status-delivered"
+                      >
+                        {presence.badgeLabel}
+                      </span>
+                    )}
                   </span>
-                  <span className="mt-0.5 block text-[10px] text-muted">
-                    Marca: {p.brandId?.name} | s/IVA: ${p.price.toFixed(2)} | c/IVA: $
-                    {(p.priceWithIva || p.price * 1.21).toFixed(2)}
+                  <span
+                    className={`shrink-0 rounded-lg px-2.5 py-1 font-medium text-white ${
+                      presence.inOrder ? 'bg-status-delivered' : 'bg-action'
+                    }`}
+                  >
+                    {presence.actionLabel}
                   </span>
-                </span>
-                <span className="shrink-0 rounded-lg bg-action px-2.5 py-1 font-medium text-white">
-                  Agregar
-                </span>
-              </button>
-            ))
+                </button>
+              );
+            })
           )}
-          {catalogProducts.length >= 30 && (
-            <div className="py-2 text-center text-[10px] text-muted">
-              Mostrando los primeros 30 resultados. Refina la búsqueda para encontrar más productos.
+          {hasMoreCatalog && (
+            <div className="p-2">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={loadMoreCatalog}
+                disabled={loadingMoreCatalog || loadingCatalog}
+                className="w-full"
+                data-testid="add-product-load-more"
+              >
+                {loadingMoreCatalog ? 'Cargando...' : 'Cargar más productos'}
+              </Button>
             </div>
           )}
         </div>

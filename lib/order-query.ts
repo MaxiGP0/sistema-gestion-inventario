@@ -6,7 +6,7 @@
  * exportación muestre pedidos que el listado no devuelve (o al revés).
  */
 
-import { objectIdSchema } from './validations';
+import { objectIdSchema, parseDateFilterValue } from './validations';
 import { buildOrderReadFilter, type OrderAccessSession } from './order-access';
 import { escapeRegex } from './escape-regex';
 import { orderShortId, ORDER_SHORT_ID_LENGTH } from './order-short-id';
@@ -138,17 +138,25 @@ export function buildOrderListQuery(
   }
 
   if (filters.startDate || filters.endDate) {
+    const startDate = filters.startDate ? parseDateFilterValue(filters.startDate) : null;
+    const endDate = filters.endDate ? parseDateFilterValue(filters.endDate) : null;
+
+    // Una URL vieja o mal formada no debe llegar a Mongoose como Invalid Date:
+    // se responde como error de validación (400) desde las rutas.
+    if ((filters.startDate && !startDate) || (filters.endDate && !endDate)) {
+      return { ok: false, error: 'Rango de fechas inválido' };
+    }
+
     query.createdAt = {};
-    if (filters.startDate) query.createdAt.$gte = new Date(filters.startDate);
-    if (filters.endDate) {
-      const end = new Date(filters.endDate);
+    if (startDate) query.createdAt.$gte = startDate;
+    if (endDate) {
       // Los presets de la bandeja mandan instantes ISO completos (con `T`) y
       // deben respetarse tal cual. Las fechas sueltas (`YYYY-MM-DD`) conservan
       // el comportamiento histórico: incluyen hasta el fin de ese día.
-      if (!filters.endDate.includes('T')) {
-        end.setHours(23, 59, 59, 999);
+      if (!filters.endDate!.includes('T')) {
+        endDate.setHours(23, 59, 59, 999);
       }
-      query.createdAt.$lte = end;
+      query.createdAt.$lte = endDate;
     }
   }
 

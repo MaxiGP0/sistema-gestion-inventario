@@ -22,7 +22,157 @@ export type { NotificationTargetRole } from './types/notification';
 const OBJECT_ID_REGEX = /^[0-9a-fA-F]{24}$/;
 const DISCOUNT_RANGE_MESSAGE = 'El descuento debe estar entre 0 y 100';
 
+/** Límites compartidos por los listados para que una URL no infle la consulta. */
+export const MAX_LIST_SEARCH_LENGTH = 80;
+export const MAX_LIST_PAGE = 100_000;
+export const DEFAULT_ORDER_LIST_LIMIT = 100;
+export const MAX_ORDER_LIST_LIMIT = 500;
+export const DEFAULT_CATALOG_LIST_LIMIT = 50;
+export const MAX_CATALOG_LIST_LIMIT = 200;
+
+const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+const ISO_DATE_TIME_REGEX =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|z|[+-]\d{2}:?\d{2})?$/;
+
 export const objectIdSchema = z.string().regex(OBJECT_ID_REGEX, 'ID no válido');
+
+function isValidCalendarDate(year: number, month: number, day: number): boolean {
+  if (year < 1000 || month < 1 || month > 12 || day < 1) return false;
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return day <= daysInMonth;
+}
+
+/**
+ * Parsea una fecha de filtro (`YYYY-MM-DD` o ISO con hora). Devuelve `null` si
+ * el formato o el día no existen, para que las rutas respondan 400 en lugar de
+ * mandar un `Invalid Date` a Mongoose.
+ */
+export function parseDateFilterValue(value: string): Date | null {
+  if (typeof value !== 'string') return null;
+
+  const trimmed = value.trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})(?:$|T)/.exec(trimmed);
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!isValidCalendarDate(year, month, day)) return null;
+
+  if (DATE_ONLY_REGEX.test(trimmed)) {
+    return new Date(Date.UTC(year, month - 1, day));
+  }
+
+  if (!ISO_DATE_TIME_REGEX.test(trimmed)) return null;
+
+  const parsed = new Date(trimmed);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+export function isDateFilterValue(value: string): boolean {
+  return parseDateFilterValue(value) !== null;
+}
+
+/** Busca vacío se normaliza a `undefined`; el tope de 80 evita claves enormes. */
+const listSearchParamSchema = z.preprocess(
+  (value) => {
+    if (typeof value !== 'string') return value;
+    const trimmed = value.trim();
+    return trimmed === '' ? undefined : trimmed;
+  },
+  z
+    .string()
+    .max(
+      MAX_LIST_SEARCH_LENGTH,
+      `La búsqueda no puede superar los ${MAX_LIST_SEARCH_LENGTH} caracteres`,
+    )
+    .optional(),
+);
+
+function normalizeQueryInteger(value: unknown, fallback: number, min: number, max: number): number {
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (raw === undefined || raw === null || raw === '') return fallback;
+
+  const parsed = typeof raw === 'number' ? raw : Number.parseInt(String(raw), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+
+  return Math.min(max, Math.max(min, Math.trunc(parsed)));
+}
+
+function queryIntegerSchema(fallback: number, min: number, max: number) {
+  return z.preprocess(
+    (value) => normalizeQueryInteger(value, fallback, min, max),
+    z.number().int().min(min).max(max),
+  );
+}
+
+const queryPageSchema = queryIntegerSchema(1, 1, MAX_LIST_PAGE);
+const orderLimitSchema = queryIntegerSchema(DEFAULT_ORDER_LIST_LIMIT, 1, MAX_ORDER_LIST_LIMIT);
+const catalogLimitSchema = queryIntegerSchema(
+  DEFAULT_CATALOG_LIST_LIMIT,
+  1,
+  MAX_CATALOG_LIST_LIMIT,
+);
+
+export const dateFilterQuerySchema = z
+  .string()
+  .trim()
+  .refine(isDateFilterValue, 'Rango de fechas inválido')
+  .optional();
+
+export const archivedQuerySchema = z
+  .enum(['true', 'false', 'all'], {
+    message: 'El filtro de archivados debe ser true, false o all',
+  })
+  .optional();
+
+/** `status` acepta un CSV y valida cada token contra la whitelist de estados. */
+export const orderStatusCsvSchema = z
+  .string({ message: 'Estado de pedido inválido' })
+  .trim()
+  .min(1, 'Estado de pedido inválido')
+  .superRefine((value, ctx) => {
+    const tokens = value.split(',').map((token) => token.trim());
+    if (tokens.some((token) => !token || !(ORDER_STATUSES as readonly string[]).includes(token))) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'Estado de pedido inválido',
+      });
+    }
+  })
+  .transform((value) =>
+    value
+      .split(',')
+      .map((token) => token.trim())
+      .join(','),
+  );
+
+/** Query params de GET /api/orders y GET /api/orders/export. */
+export const orderListQuerySchema = z.object({
+  search: listSearchParamSchema,
+  status: orderStatusCsvSchema.optional(),
+  archived: archivedQuerySchema,
+  startDate: dateFilterQuerySchema,
+  endDate: dateFilterQuerySchema,
+  clientId: objectIdSchema.optional(),
+  page: queryPageSchema,
+  limit: orderLimitSchema,
+});
+
+/** Query params de GET /api/clients (`q` es el alias histórico de `search`). */
+export const clientListQuerySchema = z.object({
+  search: listSearchParamSchema,
+  q: listSearchParamSchema,
+  page: queryPageSchema,
+  limit: catalogLimitSchema,
+});
+
+/** Query params de GET /api/products. */
+export const productListQuerySchema = z.object({
+  search: listSearchParamSchema,
+  page: queryPageSchema,
+  limit: catalogLimitSchema,
+});
 
 /**
  * Los estados y sus transiciones viven en lib/order-statuses.ts (fuente única
@@ -156,6 +306,61 @@ export const clientSchema = z.object({
   brandDiscounts: z.array(brandDiscountSchema).optional(),
 });
 
+/** Tope compartido por la API y la importación para no guardar URLs enormes. */
+export const MAX_IMAGE_URL_LENGTH = 2048;
+
+/**
+ * Normaliza una URL de imagen escrita por un usuario.
+ *
+ * Acepta:
+ * - vacío (`''`) para borrar la imagen;
+ * - rutas locales servidas por la app (`/uploads/foto.jpg`);
+ * - URLs absolutas `https:`.
+ *
+ * Rechaza esquemas ejecutables (`javascript:`, `data:`, `blob:`), credenciales
+ * embebidas, rutas protocol-relative (`//host/...`) y textos de más de 2048
+ * caracteres. Devuelve `null` cuando el valor no es válido.
+ */
+export function normalizeImageUrlInput(value: string): string | null {
+  const trimmed = value.trim();
+  if (trimmed.length > MAX_IMAGE_URL_LENGTH) return null;
+  if (trimmed === '') return '';
+
+  if (trimmed.startsWith('/')) {
+    // `//host` es una URL externa protocol-relative, no una ruta local.
+    if (trimmed.startsWith('//')) return null;
+    // Backslashes y caracteres de control pueden confundir a proxys/routers.
+    if (/[\\\u0000-\u001f\u007f]/.test(trimmed)) return null;
+    return trimmed;
+  }
+
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return null;
+  }
+
+  if (url.protocol !== 'https:') return null;
+  if (url.username !== '' || url.password !== '') return null;
+  if (url.hostname === '') return null;
+
+  return trimmed;
+}
+
+export const imageUrlSchema = z
+  .string({ message: 'La URL de imagen debe ser un texto' })
+  .trim()
+  .max(
+    MAX_IMAGE_URL_LENGTH,
+    `La URL de imagen no puede superar los ${MAX_IMAGE_URL_LENGTH} caracteres`,
+  )
+  .refine(
+    (value) => normalizeImageUrlInput(value) !== null,
+    'La URL de imagen debe ser una ruta local o una URL HTTPS válida',
+  )
+  .optional();
+
 export const productSchema = z.object({
   brandId: objectIdSchema,
   code: z.string().trim().min(1, 'El código del producto es obligatorio'),
@@ -167,7 +372,7 @@ export const productSchema = z.object({
     .number({ message: 'El precio con IVA debe ser un número' })
     .nonnegative('El precio con IVA no puede ser negativo')
     .optional(),
-  imageUrl: z.string().optional(),
+  imageUrl: imageUrlSchema,
 });
 
 export const brandSchema = z.object({

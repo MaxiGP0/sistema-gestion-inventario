@@ -26,6 +26,7 @@
 
 import { NextResponse, type NextRequest } from 'next/server';
 import { canAccessPage } from '@/lib/authz';
+import { PRIVATE_REVALIDATE_CACHE_CONTROL } from '@/lib/cache-control';
 import { REQUEST_ID_HEADER, attachRequestId, logError, resolveRequestId } from '@/lib/logger';
 import { captureServerError } from '@/lib/observability/errors-server';
 import { clearSessionCookies, readSessionToken, verifySessionToken } from '@/lib/session';
@@ -126,12 +127,27 @@ export function proxy(request: NextRequest): NextResponse {
   const { pathname } = request.nextUrl;
   const normalizedPath = normalizePathname(pathname);
   const requestId = resolveRequestId(request);
+  const isApiRequest = normalizedPath.startsWith('/api/');
 
   /** `next()` reenviando el request-id a la ruta. */
   const next = () => {
     const headers = new Headers(request.headers);
     headers.set(REQUEST_ID_HEADER, requestId);
     return NextResponse.next({ request: { headers } });
+  };
+
+  /**
+   * Las páginas autenticadas necesitan revalidarse, pero no deben impedir que
+   * el navegador las restaure desde bfcache. `no-store` en el documento raíz
+   * descalifica la página; `private, no-cache` mantiene la privacidad y la
+   * revalidación sin bloquear "atrás". Los GET de API fijan su propia política.
+   */
+  const nextResponse = () => {
+    const response = attachRequestId(next(), requestId);
+    if (!isApiRequest && !isStaticAsset(pathname)) {
+      response.headers.set('Cache-Control', PRIVATE_REVALIDATE_CACHE_CONTROL);
+    }
+    return response;
   };
 
   if (isCrossOriginMutation(request)) {
@@ -142,7 +158,7 @@ export function proxy(request: NextRequest): NextResponse {
   }
 
   if (isStaticAsset(pathname) || PUBLIC_PATHS.has(normalizedPath)) {
-    return attachRequestId(next(), requestId);
+    return nextResponse();
   }
 
   let session = null;
@@ -165,8 +181,6 @@ export function proxy(request: NextRequest): NextResponse {
     );
   }
 
-  const isApiRequest = normalizedPath.startsWith('/api/');
-
   if (!session) {
     if (isApiRequest) {
       const response = NextResponse.json({ error: 'Sesión requerida' }, { status: 401 });
@@ -182,7 +196,7 @@ export function proxy(request: NextRequest): NextResponse {
     return attachRequestId(NextResponse.redirect(new URL('/', request.url)), requestId);
   }
 
-  return attachRequestId(next(), requestId);
+  return nextResponse();
 }
 
 export const config = {

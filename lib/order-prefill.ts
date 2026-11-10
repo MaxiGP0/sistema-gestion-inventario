@@ -11,7 +11,23 @@
 
 import type { InvoiceType, PaymentCondition } from './order-commercial';
 import type { OrderCatalogClient, QuantityMap } from './order-catalog';
-import type { OrderDTO, OrderItemDTO } from './types';
+import type {
+  OrderClientDTO,
+  OrderClientSummaryDTO,
+  OrderDTO,
+  OrderItemDTO,
+  OrderItemProductDTO,
+  OrderSummaryDTO,
+  OrderSummaryItemDTO,
+} from './types';
+
+/**
+ * Fuente de la precarga: el detalle completo (`OrderDTO`) o el resumen que ya
+ * devuelve `GET /api/orders?clientId=…&limit=1`. El resumen incluye
+ * `items.productId` escalar, así repetir un pedido no necesita otro request.
+ */
+export type OrderPrefillSource = OrderDTO | OrderSummaryDTO;
+type OrderPrefillItem = OrderItemDTO | OrderSummaryItemDTO;
 
 export interface OrderPrefillOmittedItem {
   productId: string;
@@ -49,21 +65,47 @@ export function buildPrefillOmittedMessage(
 }
 
 /**
- * Convierte el detalle de un pedido en el estado inicial del carrito.
+ * Id escalar de la línea, venga poblado (`OrderDTO`) o como referencia
+ * (`OrderSummaryDTO`). Es la única pieza del producto que necesita el carrito:
+ * nombre, precio y descuentos se resuelven con el catálogo vigente.
+ */
+export function orderItemProductId(item: {
+  productId?: string | OrderItemProductDTO | null;
+}): string {
+  const productId = item.productId;
+  if (!productId) return '';
+  if (typeof productId === 'string') return productId;
+  return productId._id ?? '';
+}
+
+function populatedProductId(item: OrderPrefillItem): OrderItemDTO['productId'] {
+  const productId = item.productId;
+  return productId && typeof productId === 'object' ? productId : null;
+}
+
+/**
+ * Convierte el detalle o el resumen de un pedido en el estado inicial del
+ * carrito.
  *
  * - Suma cantidades si el pedido repite un producto en más de una línea.
  * - Omite productos con baja lógica o inexistentes y los reporta.
- * - Usa la ficha del cliente que vino poblada en el pedido; si el cliente fue
- *   eliminado, busca una coincidencia por código/nombre en el listado recibido.
+ * - Usa la ficha completa del cliente cuando vino poblada en el detalle, la
+ *   combina con el listado conocido (descuentos) cuando sólo llegó el resumen,
+ *   y cae a una coincidencia por código/nombre si el cliente fue eliminado.
  */
 export function buildOrderPrefill(
-  order: OrderDTO,
+  order: OrderPrefillSource,
   knownClients: readonly OrderCatalogClient[] = [],
+  preferredClient: OrderCatalogClient | null = null,
 ): OrderPrefill {
   const populatedClient =
     order.clientId && typeof order.clientId === 'object' ? order.clientId : null;
+  const populatedClientWithId = populatedClient?._id ? populatedClient : null;
 
-  const fallbackClient =
+  const knownClient =
+    (populatedClientWithId
+      ? knownClients.find((client) => client._id === populatedClientWithId._id)
+      : undefined) ??
     (order.clientCode
       ? knownClients.find((client) => client.code === order.clientCode)
       : undefined) ??
@@ -71,19 +113,10 @@ export function buildOrderPrefill(
       ? knownClients.find((client) => client.name === order.clientName)
       : undefined);
 
-  const client: OrderCatalogClient | null = populatedClient?._id
-    ? ({
-        ...populatedClient,
-        _id: populatedClient._id,
-        code: populatedClient.code,
-        name: populatedClient.name,
-        address: populatedClient.address,
-        localidad: populatedClient.localidad,
-        province: populatedClient.province,
-        generalDiscount: populatedClient.generalDiscount,
-        brandDiscounts: populatedClient.brandDiscounts,
-      } as OrderCatalogClient)
-    : (fallbackClient ?? null);
+  const baseClient = preferredClient ?? knownClient ?? null;
+  const client = populatedClientWithId
+    ? mergePrefillClient(populatedClientWithId, baseClient)
+    : baseClient;
 
   const quantities: QuantityMap = {};
   const omittedItems: OrderPrefillOmittedItem[] = [];
@@ -94,17 +127,18 @@ export function buildOrderPrefill(
 
     const omitted = omitReason(item);
     if (omitted) {
+      const product = populatedProductId(item);
       omittedItems.push({
-        productId: item.productId?._id ?? '',
-        productCode: item.productCode ?? item.productId?.code,
-        productName: item.productName ?? item.productId?.name,
+        productId: orderItemProductId(item),
+        productCode: item.productCode ?? product?.code,
+        productName: item.productName ?? product?.name,
         requestedQuantity,
         reason: omitted,
       });
       continue;
     }
 
-    const productId = item.productId!._id;
+    const productId = orderItemProductId(item);
     quantities[productId] = (quantities[productId] ?? 0) + requestedQuantity;
   }
 
@@ -118,8 +152,30 @@ export function buildOrderPrefill(
   };
 }
 
-function omitReason(item: OrderItemDTO): OrderPrefillOmittedItem['reason'] | null {
-  if (!item.productId?._id) return 'not_found';
-  if (item.productId.active === false) return 'inactive';
+function mergePrefillClient(
+  populated: OrderClientDTO | OrderClientSummaryDTO,
+  fallback: OrderCatalogClient | null,
+): OrderCatalogClient {
+  const address = 'address' in populated ? populated.address : undefined;
+  const generalDiscount = 'generalDiscount' in populated ? populated.generalDiscount : undefined;
+  const brandDiscounts = 'brandDiscounts' in populated ? populated.brandDiscounts : undefined;
+
+  return {
+    ...(fallback ?? {}),
+    _id: populated._id ?? fallback?._id ?? '',
+    code: populated.code ?? fallback?.code ?? '',
+    name: populated.name ?? fallback?.name ?? '',
+    address: address ?? fallback?.address,
+    localidad: populated.localidad ?? fallback?.localidad,
+    province: populated.province ?? fallback?.province,
+    generalDiscount: generalDiscount ?? fallback?.generalDiscount,
+    brandDiscounts: (brandDiscounts ??
+      fallback?.brandDiscounts) as OrderCatalogClient['brandDiscounts'],
+  };
+}
+
+function omitReason(item: OrderPrefillItem): OrderPrefillOmittedItem['reason'] | null {
+  if (!orderItemProductId(item)) return 'not_found';
+  if (populatedProductId(item)?.active === false) return 'inactive';
   return null;
 }

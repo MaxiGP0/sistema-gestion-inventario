@@ -122,11 +122,13 @@ const orderDoc = (createdAt: string) => ({
   version: 0,
   invoiceType: 'A',
   paymentCondition: 'contado',
+  paymentConditionDetail: 'Cheque a 30 días',
   items: [
     {
       _id: oid(),
+      productId: oid(),
       productCode: 'P1',
-      productName: 'Shampoo Capitalis',
+      productName: 'Shampoo NovaFarma',
       requestedQuantity: 3,
       verifiedQuantity: 1,
       isPending: true,
@@ -135,7 +137,7 @@ const orderDoc = (createdAt: string) => ({
     {
       _id: oid(),
       productCode: 'P2',
-      productName: 'Acondicionador Capitalis',
+      productName: 'Acondicionador NovaFarma',
       requestedQuantity: 2,
       verifiedQuantity: 2,
       isPending: false,
@@ -206,21 +208,23 @@ test('buildOrderListPage aplica el filtro del vendedor y la proyección liviana'
   const [order] = result.orders;
   assert.equal(order.invoiceType, 'A');
   assert.equal(order.paymentCondition, 'contado');
-  assert.equal(order.items[0]?.productName, 'Shampoo Capitalis');
+  assert.equal(order.paymentConditionDetail, 'Cheque a 30 días');
+  assert.equal(order.items[0]?.productName, 'Shampoo NovaFarma');
   assert.equal(order.items[0]?.requestedQuantity, 3);
   assert.equal(order.items[0]?.verifiedQuantity, 1);
   assert.equal(order.items[0]?.isPending, true);
   assert.equal(order.items[0]?.pendingReason, 'Sin stock en depósito');
-  assert.equal((order.items[0] as any)?.productId, undefined);
+  assert.equal(typeof order.items[0]?.productId, 'string');
   assert.equal(order.comments?.length, 1);
   assert.equal(order.comments?.[0]?.text, 'Último comentario');
 });
 
-test('ORDER_LIST_SELECT incluye el contexto de tarjeta y excluye el producto poblado', () => {
+test('ORDER_LIST_SELECT incluye la referencia al producto y el detalle comercial', () => {
   const fields = ORDER_LIST_SELECT.split(/\s+/);
 
   for (const field of [
     'items._id',
+    'items.productId',
     'items.productName',
     'items.productCode',
     'items.requestedQuantity',
@@ -229,13 +233,14 @@ test('ORDER_LIST_SELECT incluye el contexto de tarjeta y excluye el producto pob
     'items.pendingReason',
     'invoiceType',
     'paymentCondition',
+    'paymentConditionDetail',
     'comments',
   ]) {
     assert.ok(fields.includes(field), `falta ${field} en ORDER_LIST_SELECT`);
   }
 
-  assert.ok(!fields.includes('items.productId'));
   assert.ok(!fields.includes('items.unitPrice'));
+  assert.ok(!fields.includes('items.itemDiscount'));
   assert.ok(!fields.includes('comments.text'));
 });
 
@@ -311,7 +316,7 @@ test('buildOrderListPage busca por producto incluido en el pedido', async () => 
     legacyCondition.$or.some(
       (branch: Record<string, unknown>) =>
         branch['items.productName'] instanceof RegExp &&
-        branch['items.productName'].test('Shampoo Capitalis'),
+        branch['items.productName'].test('Shampoo NovaFarma'),
     ),
   );
 });

@@ -1,20 +1,23 @@
 import { NextResponse } from 'next/server';
 import dbConnect from '@/lib/mongodb';
-import { requireCurrentRole, requireSession } from '@/lib/auth';
+import { requireCurrentRole, requireCurrentSession } from '@/lib/auth';
 import { resolveUserRole } from '@/lib/authz';
 import { Order } from '@/models/Order';
 import { Client } from '@/models/Client';
 import { Product } from '@/models/Product';
-import { createOrderSchema } from '@/lib/validations';
+import { createOrderSchema, orderListQuerySchema } from '@/lib/validations';
 import { publishOrderNotification } from '@/lib/order-side-effects';
 import { runAfterResponse } from '@/lib/after-response';
-import { errorResponse, handleRouteError, parseJsonBody } from '@/lib/api-errors';
-import { findOrderByClientRequestId, isDuplicateKeyError } from '@/lib/order-idempotency';
+import { errorResponse, handleRouteError, parseJsonBody, parseQueryParams } from '@/lib/api-errors';
+import { PRIVATE_REVALIDATE_HEADERS } from '@/lib/cache-control';
 import {
-  buildOrderListPage,
-  DEFAULT_ORDER_API_PAGE_SIZE,
-  MAX_ORDER_PAGE_SIZE,
-} from '@/lib/services/order-read';
+  API_RATE_LIMIT_RULES,
+  apiRateLimitKey,
+  consume,
+  rateLimitResponse,
+} from '@/lib/api-rate-limit';
+import { findOrderByClientRequestId, isDuplicateKeyError } from '@/lib/order-idempotency';
+import { buildOrderListPage } from '@/lib/services/order-read';
 import {
   collectRequestedProductIds,
   createOrderDraft,
@@ -30,46 +33,47 @@ import { withRouteLogging } from '@/lib/logger';
 
 export const GET = withRouteLogging(async (request: Request) => {
   try {
-    const auth = requireSession(request);
+    const auth = await requireCurrentSession(request);
     if ('response' in auth) return auth.response;
 
-    const { searchParams } = new URL(request.url);
-    const statusParam = searchParams.get('status');
-    const archivedParam = searchParams.get('archived'); // 'true', 'false', 'all'
-    const search = searchParams.get('search');
-    const startDate = searchParams.get('startDate');
-    const endDate = searchParams.get('endDate');
-    const clientIdParam = searchParams.get('clientId');
+    // Los query params se validan antes de tocar la base: búsqueda acotada,
+    // estados del CSV en la whitelist, archivado explícito y fechas reales.
+    const parsedQuery = parseQueryParams(request, orderListQuerySchema);
+    if (!parsedQuery.success) return parsedQuery.response;
+
+    const filters = parsedQuery.data;
+    const searchParams = new URL(request.url).searchParams;
+
+    // El listado sin búsqueda ya está acotado por la paginación; las búsquedas
+    // repetidas son las que más cuestan y se limitan por usuario autenticado.
+    if (filters.search) {
+      const limitResult = consume(
+        apiRateLimitKey('orders-search', auth.session.userId),
+        API_RATE_LIMIT_RULES.ordersSearch,
+      );
+      if (!limitResult.allowed) return rateLimitResponse(limitResult);
+    }
+
     const cursorParam = searchParams.get('cursor');
     // El primer pedido de la bandeja usa `pagination=cursor` sin cursor; las
     // páginas siguientes envían el cursor opaco que devolvió el API.
     const cursorMode = cursorParam !== null || searchParams.get('pagination') === 'cursor';
-    // Parámetros de paginación robustos: valores no numéricos caen a los defaults.
-    const parsedPage = parseInt(searchParams.get('page') || '1', 10);
-    const parsedLimit = parseInt(
-      searchParams.get('limit') || String(DEFAULT_ORDER_API_PAGE_SIZE),
-      10,
-    );
-    const page = Number.isFinite(parsedPage) ? Math.max(1, parsedPage) : 1;
-    const limit = Number.isFinite(parsedLimit)
-      ? Math.min(MAX_ORDER_PAGE_SIZE, Math.max(1, parsedLimit))
-      : DEFAULT_ORDER_API_PAGE_SIZE;
 
     // Mismos filtros, proyección, populate y permisos que usan las bandejas
     // server-side: la construcción vive en lib/services/order-read.ts.
     const result = await buildOrderListPage(
       auth.session,
       {
-        status: statusParam,
-        archived: archivedParam,
-        search,
-        startDate,
-        endDate,
-        clientId: clientIdParam,
+        status: filters.status ?? null,
+        archived: filters.archived ?? null,
+        search: filters.search ?? null,
+        startDate: filters.startDate ?? null,
+        endDate: filters.endDate ?? null,
+        clientId: filters.clientId ?? null,
       },
       cursorParam,
-      limit,
-      { mode: cursorMode ? 'cursor' : 'page', page },
+      filters.limit,
+      { mode: cursorMode ? 'cursor' : 'page', page: filters.page },
     );
 
     if (!result.ok) {
@@ -82,7 +86,7 @@ export const GET = withRouteLogging(async (request: Request) => {
         orders: result.orders,
         pagination: result.pagination,
       };
-      return NextResponse.json(response);
+      return NextResponse.json(response, { headers: PRIVATE_REVALIDATE_HEADERS });
     }
 
     // Compatibilidad con clientes que todavía usan page/limit.
@@ -91,7 +95,7 @@ export const GET = withRouteLogging(async (request: Request) => {
       orders: result.orders,
       pagination: result.pagination,
     };
-    return NextResponse.json(response);
+    return NextResponse.json(response, { headers: PRIVATE_REVALIDATE_HEADERS });
   } catch (error: unknown) {
     return handleRouteError(error, { context: 'Error al listar pedidos:' });
   }

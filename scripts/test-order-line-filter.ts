@@ -10,6 +10,7 @@ import { test } from 'node:test';
 
 import {
   countOrderLineFilters,
+  extractOrderLineBrands,
   filterOrderLines,
   matchesOrderLineSearch,
   normalizeOrderLineSearch,
@@ -178,5 +179,94 @@ test('una línea fijada se conserva visible aunque el chip o la búsqueda ya no 
     ),
     ['a', 'b', 'c'],
     'sin extractor explícito usa el id de la línea',
+  );
+});
+
+test('extrae las marcas únicas del pedido ordenadas con su conteo', () => {
+  const branded = [
+    line({ id: 'a', brandName: 'Zeta' }),
+    line({ id: 'b', brandName: 'Alfa' }),
+    line({ id: 'c', brandName: 'Alfa' }),
+    line({ id: 'd' }),
+    line({
+      id: 'e',
+      brandName: undefined,
+      productId: { code: 'POB-1', name: 'Poblado', brandId: { name: 'Beta' } },
+    }),
+  ];
+
+  assert.deepEqual(extractOrderLineBrands(branded), [
+    { name: 'Alfa', count: 2 },
+    { name: 'Beta', count: 1 },
+    { name: 'Zeta', count: 1 },
+  ]);
+  assert.deepEqual(extractOrderLineBrands([]), []);
+});
+
+test('estado y marca se combinan respetando la búsqueda y los pins', () => {
+  const branded = [
+    line({ id: 'a', brandName: 'Alfa', productName: 'Amoxicilina 500', pending: true }),
+    line({
+      id: 'b',
+      brandName: 'Beta',
+      productName: 'Ibuprofeno 400',
+      difference: true,
+    }),
+    line({
+      id: 'c',
+      brandName: 'Alfa',
+      productName: 'Paracetamol 100',
+      pending: true,
+      difference: true,
+    }),
+    line({ id: 'd', brandName: 'Beta', productName: 'Diclofenac 75', pending: true }),
+    line({ id: 'e', productName: 'Sin marca', pending: true }),
+  ];
+  const keyOf = (item: TestLine) => item.id;
+
+  assert.deepEqual(
+    filterOrderLines(branded, { filter: 'pending', brandName: 'Alfa' }, predicates, keyOf).map(
+      (item) => item.id,
+    ),
+    ['a', 'c'],
+    'la marca recorta el chip de pendientes',
+  );
+
+  assert.deepEqual(
+    filterOrderLines(branded, { filter: 'difference', brandName: 'Beta' }, predicates, keyOf).map(
+      (item) => item.id,
+    ),
+    ['b'],
+    'la marca también se combina con diferencia',
+  );
+
+  assert.deepEqual(
+    filterOrderLines(
+      branded,
+      { filter: 'all', brandName: 'Alfa', query: 'paracetamol' },
+      predicates,
+      keyOf,
+    ).map((item) => item.id),
+    ['c'],
+    'búsqueda y marca se aplican juntas',
+  );
+
+  assert.deepEqual(
+    filterOrderLines(
+      branded,
+      { filter: 'pending', brandName: 'Alfa', pinnedKeys: new Set(['d']) },
+      predicates,
+      keyOf,
+    ).map((item) => item.id),
+    ['a', 'c', 'd'],
+    'un pin de otra marca se conserva visible en su posición original',
+  );
+
+  assert.deepEqual(
+    filterOrderLines(branded, { filter: 'pending', brandName: 'all' }, predicates, keyOf).map(
+      (item) => item.id,
+    ),
+    ['a', 'c', 'd', 'e'],
+    '"all" no filtra por marca',
   );
 });

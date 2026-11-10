@@ -2,6 +2,17 @@
 
 Aplicación web Full-Stack y **Progressive Web App (PWA) Offline-First** diseñada para digitalizar, controlar y agilizar de punta a punta el flujo operativo de inventario y pedidos: desde la toma de pedidos en calle con catálogo por marcas y descuentos personalizados, pasando por el picking físico y gestión de faltantes en depósito, hasta la preparación de datos estructurados para facturación y el control post-factura de despacho.
 
+## ✨ Novedades recientes
+
+* **Offline sin pérdida de trabajo:** autoguardado de la edición de borradores, cola idempotente de altas y `PUT`, persistencia del control post-factura y de los comentarios pendientes, y sincronización automática al reconectar.
+* **Búsqueda más rápida:** índice multikey que combina código, nombre y marca (`"marca + producto"` funciona igual online y offline), caché de consultas y deltas incrementales del catálogo al volver a foco.
+* **Repetir último pedido en un paso:** el resumen del último pedido por cliente se guarda localmente y se reutiliza sin red ni un segundo `fetch`.
+* **Ergonomía móvil:** tarjetas compactas, checkout con miniaturas y edición de descuentos por línea, filtros `sticky`, renderizado diferido de listas largas, picking por marca, respuesta háptica y opción de mantener la pantalla despierta.
+* **Avisos que no se pisan:** los banners flotantes se apilan por capas y se ocultan al abrir el teclado virtual.
+* **Navegación continua:** la búsqueda y los filtros de las bandejas se conservan al abrir un pedido y volver; la barra móvil indica si hay un borrador activo.
+* **Backoffice móvil:** los formularios de alta se pliegan para priorizar la búsqueda y la edición; la baja de marcas contempla los productos con baja lógica.
+* **Endurecimiento de API:** rate limit por IP, timeouts en `fetch`, límites de consultas costosas, revocación de sesión en lecturas/SSE y sanitización de exportaciones CSV/XLSX.
+
 ---
 
 ## 🛠️ Tecnologías Utilizadas
@@ -63,6 +74,10 @@ SEED_ADMIN_PASSWORD=demo2026
 | `MONGODB_URI` | Sí | Cadena de conexión a MongoDB. Ej. local: `mongodb://127.0.0.1:27017/sistema-gestion-inventario` o Atlas: `mongodb+srv://...`. |
 | `AUTH_SECRET` | Sí | Secreto con el que se firma la cookie de sesión (HMAC SHA-256). Mínimo 16 caracteres. |
 | `AUTH_SESSION_CACHE_TTL_SECONDS` | No | Vigencia (30–60 s) del caché que valida `active`, `sessionVersion` y rol en cada escritura. Por defecto `45`. |
+| `TRUST_PROXY_HEADERS` | No | Confía en `x-forwarded-for` / `x-real-ip` para resolver la IP del rate limit. Sólo activarlo detrás de un proxy propio. Por defecto `false`. |
+| `OFFLINE_CATALOG_MAX_PRODUCTS` | No | Tope de productos del snapshot offline. Por defecto `5000`. |
+| `OFFLINE_CATALOG_MAX_CLIENTS` | No | Tope de clientes del snapshot offline. Por defecto `2000`. |
+| `NEXT_PUBLIC_BUILD_ID` | No | Identificador que versiona las cachés del Service Worker. Si se omite se usa el SHA de CI o un id local. |
 | `SEED_ADMIN_PASSWORD` | No | Contraseña del usuario `admin` creado por `npm run seed`. Por defecto `demo2026`. |
 | `SEED_USERS` | No | Usuarios adicionales opcionales con formato `Nombre[rol]:contraseña` (`vendedor` o `controlador`). |
 | `LOG_LEVEL` | No | Nivel de logging estructurado: `info` (por defecto), `warn`, `error` o `silent`. |
@@ -127,12 +142,12 @@ Abrí [http://localhost:3000](http://localhost:3000) en el navegador e iniciá s
 npm test
 ```
 
-Ejecuta más de 40 suites con el runner nativo de Node (`tsx` + `node:test`), utilizando `mongodb-memory-server` y `fake-indexeddb` (no requiere tener MongoDB externo levantado). Cubre:
-* Validaciones de esquemas y variables de entorno (`test-env.ts`, `test-validations.ts`).
+Ejecuta más de 80 suites con el runner nativo de Node (`tsx` + `node:test`), utilizando `mongodb-memory-server` y `fake-indexeddb` (no requiere tener MongoDB externo levantado). Cubre:
+* Validaciones de esquemas, variables de entorno, timeouts, rate limit y respuestas de error sin filtraciones (`test-env.ts`, `test-validations.ts`, `test-api-hardening.ts`).
 * Reglas de negocio de pedidos, descuentos generales/por marca, totales post-picking, snapshots, idempotencia y concurrencia optimista (`test-order-*.ts`, `test-discounts.ts`).
-* Catálogo, bajas lógicas, importación masiva Excel y normalización de búsquedas sin `COLLSCAN` (`test-catalog-*.ts`, `test-search-normalization.ts`).
+* Catálogo, bajas lógicas, importación masiva Excel y normalización de búsquedas sin `COLLSCAN`, incluida la búsqueda por marca (`test-catalog-*.ts`, `test-search-normalization.ts`).
 * Administración de usuarios, sesiones, revocación inmediata, cabeceras de seguridad, protección CSRF y cookie `__Host-sgi_session` (`test-users-admin.ts`, `test-security.ts`).
-* Cola offline en IndexedDB, catálogo offline, service worker y notificaciones SSE / Web Push (`test-offline-*.ts`, `test-pwa-sw.ts`, `test-push-*.ts`, `test-sw-push.ts`).
+* Cola offline en IndexedDB, autosave de borradores y picking, control post-factura, comentarios pendientes, catálogo offline, service worker y notificaciones SSE / Web Push (`test-offline-*.ts`, `test-order-draft.ts`, `test-post-control-queue.ts`, `test-pending-order-comment.ts`, `test-pwa-sw.ts`, `test-push-*.ts`, `test-sw-push.ts`).
 
 ### 2. Tests End-to-End con Playwright (`npm run test:e2e`)
 
@@ -141,8 +156,8 @@ npm run test:e2e:install   # una sola vez: instala Chromium y WebKit
 npm run test:e2e
 ```
 
-`npm run test:e2e` levanta automáticamente un MongoDB efímero en el puerto `27019`, siembra la base `sgi-e2e` y ejecuta los tests en dos fases:
-1. **Flujos generales** sobre el servidor de desarrollo (login, permisos por rol, alta de pedido, edición, duplicación, picking en depósito, paralización, facturación, control post-factura, entrega, impresión A4, compartir por WhatsApp y accesibilidad con Axe).
+`npm run test:e2e` levanta automáticamente un MongoDB efímero en el puerto `27019`, siembra la base `sgi-e2e` y ejecuta las 23 specs en dos fases:
+1. **Flujos generales** sobre el servidor de desarrollo (login, permisos por rol, alta de pedido, edición, duplicación, picking en depósito, paralización, facturación, control post-factura, entrega, impresión A4, compartir por WhatsApp, revocación de sesión, escrituras offline y accesibilidad con Axe).
 2. **Suite PWA y Offline** sobre un build de producción para validar el Service Worker real, precache, arranque en frío sin red e hidratación desde IndexedDB.
 
 ### 3. Tests E2E exclusivos de PWA y modo Offline (`npm run test:e2e:pwa`)
@@ -204,9 +219,11 @@ Ejecuta el pipeline completo de rendimiento móvil contra los umbrales definidos
 7. 🛡️ **[Cabeceras de seguridad, CSRF y cookie `__Host-`](./docs/seguridad-cabeceras.md)**.
 8. 🔁 **[Idempotencia del alta de pedidos y cola offline](./docs/idempotencia-alta-pedidos.md)**.
 9. 📴 **[Caché PWA](./docs/pwa-cache.md)** y **[Catálogo offline en IndexedDB](./docs/catalogo-offline.md)**.
-10. 📈 **[Observabilidad: Sentry, métricas y alertas](./docs/observabilidad.md)**.
-11. 💾 **[Backup, restore y retención de MongoDB](./docs/backup-restore-mongo.md)**.
-12. 📱 **[Rendimiento móvil y presupuestos de CI](./docs/rendimiento-movil.md)**.
+10. 🔎 **[Búsquedas escalables](./docs/busquedas-escalables.md)** y **[Caché de consultas de catálogo](./docs/cache-consultas-catalogo.md)**.
+11. ⚡ **[Rendimiento de listas largas](./docs/rendimiento-listas-largas.md)**.
+12. 📈 **[Observabilidad: Sentry, métricas y alertas](./docs/observabilidad.md)**.
+13. 💾 **[Backup, restore y retención de MongoDB](./docs/backup-restore-mongo.md)**.
+14. 📱 **[Rendimiento móvil y presupuestos de CI](./docs/rendimiento-movil.md)**.
 
 ---
 

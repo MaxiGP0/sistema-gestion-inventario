@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import dbConnect from '@/lib/mongodb';
-import { requireCurrentRole, requireSession } from '@/lib/auth';
+import { requireCurrentRole, requireCurrentSession } from '@/lib/auth';
 import { Client } from '@/models/Client';
 import { Order } from '@/models/Order';
 import { getClientById } from '@/lib/catalog';
@@ -20,7 +20,7 @@ import { withRouteLogging } from '@/lib/logger';
 export const GET = withRouteLogging(
   async (request: Request, { params }: { params: Promise<{ id: string }> }) => {
     try {
-      const auth = requireSession(request);
+      const auth = await requireCurrentSession(request);
       if ('response' in auth) return auth.response;
 
       const { id } = await params;

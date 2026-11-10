@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   AlertTriangle,
@@ -9,6 +9,7 @@ import {
   ClipboardList,
   Clock,
   Copy,
+  MessageSquare,
   Package,
   Pencil,
 } from 'lucide-react';
@@ -16,6 +17,7 @@ import AppShell from '@/components/app-shell/AppShell';
 import StatusBadge from '@/components/StatusBadge';
 import CommentsPanel from '@/components/CommentsPanel';
 import ConfirmDialog from '@/components/ConfirmDialog';
+import ProductThumbnail from '@/components/ProductThumbnail';
 import Button from '@/components/ui/Button';
 import Card from '@/components/ui/Card';
 import EmptyState from '@/components/ui/EmptyState';
@@ -33,12 +35,18 @@ import {
   TableHeaderRow,
   TableRow,
 } from '@/components/ui/Table';
-import { api } from '@/lib/api-client';
+import { api, isNetworkError, isTimeoutError } from '@/lib/api-client';
 import type { UserRole } from '@/lib/authz';
 import { DASHBOARD_TIME_ZONE } from '@/lib/dashboard-time';
 import { formatInvoiceType, formatPaymentCondition } from '@/lib/order-commercial';
 import {
+  clearPendingOrderComment,
+  loadPendingOrderComment,
+  savePendingOrderComment,
+} from '@/lib/pending-order-comment';
+import {
   countOrderLineFilters,
+  extractOrderLineBrands,
   filterOrderLines,
   type OrderLineFilter,
 } from '@/lib/order-line-filter';
@@ -68,6 +76,16 @@ const formatDate = (value: string) => {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? '—' : DATE_TIME_FORMATTER.format(date);
 };
+
+/** localStorage puede no estar disponible (SSR o modo privado). */
+function resolveLocalStorage(): Storage | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
 
 const LINE_STATUS_TONE_STYLES: Record<OrderLineStatusTone, string> = {
   neutral: 'border-border bg-surface-muted text-subtle',
@@ -109,6 +127,7 @@ function ItemPendingBadge({
  */
 export default function VendorOrderDetail({
   orderId,
+  userId,
   role,
   username,
   initialOrder,
@@ -116,6 +135,8 @@ export default function VendorOrderDetail({
   initialFetchedAt,
 }: {
   orderId: string;
+  /** Dueño del borrador local de comentarios. */
+  userId: string;
   role: UserRole;
   username: string;
   initialOrder: OrderDTO | null;
@@ -132,9 +153,19 @@ export default function VendorOrderDetail({
   const { showToast } = useToast();
   const [newComment, setNewComment] = useState('');
   const [savingComment, setSavingComment] = useState(false);
+  const [pendingComment, setPendingComment] = useState('');
+  // El evento `online` puede llegar antes de que React vuelva a registrar el
+  // listener con el comentario restaurado. El ref conserva el valor vigente
+  // para que el reintento no dependa del momento en que se hidrató la vista.
+  const pendingCommentRef = useRef('');
+  const [retryingComment, setRetryingComment] = useState(false);
+  const retryingCommentRef = useRef(false);
   const [lineFilter, setLineFilter] = useState<OrderLineFilter>('all');
+  const [lineBrandFilter, setLineBrandFilter] = useState('all');
   const [lineSearch, setLineSearch] = useState('');
   const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
+  const commentsSectionRef = useRef<HTMLDivElement | null>(null);
+  const commentTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   // Al volver de la edición, el Router Cache puede tener el RSC anterior del
   // detalle. El marcador fuerza una revalidación silenciosa con la API.
@@ -142,9 +173,153 @@ export default function VendorOrderDetail({
     if (consumeOrdersTrayRefresh(`/orders/${orderId}`)) void refresh();
   }, [orderId, refresh]);
 
+  const persistPendingComment = useCallback(
+    (text: string) => {
+      const comment = text.trim();
+      if (!comment) return false;
+
+      const saved = savePendingOrderComment(resolveLocalStorage(), {
+        orderId,
+        userId,
+        text: comment,
+        savedAt: Date.now(),
+      });
+
+      if (saved) {
+        pendingCommentRef.current = comment;
+        setPendingComment(comment);
+      }
+      return saved;
+    },
+    [orderId, userId],
+  );
+
+  const clearPendingComment = useCallback(() => {
+    clearPendingOrderComment(resolveLocalStorage(), userId, orderId);
+    pendingCommentRef.current = '';
+    setPendingComment('');
+  }, [orderId, userId]);
+
+  // Al reabrir el pedido se muestra el comentario que quedó sin sincronizar.
+  useEffect(() => {
+    const draft = loadPendingOrderComment(resolveLocalStorage(), userId, orderId);
+    if (!draft) return;
+
+    setPendingComment(draft.text);
+    pendingCommentRef.current = draft.text;
+    setNewComment((current) => current || draft.text);
+  }, [orderId, userId]);
+
+  // Si el vendedor edita el texto después de un fallo, el borrador local
+  // conserva la última versión para reintentarla tal cual.
+  useEffect(() => {
+    if (!pendingComment) return;
+
+    const edited = newComment.trim();
+    if (!edited || edited === pendingComment) return;
+
+    persistPendingComment(edited);
+  }, [newComment, pendingComment, persistPendingComment]);
+
+  /**
+   * Reintenta el comentario pendiente sin tocar el estado del pedido. Se usa
+   * al recuperar conexión y desde el botón del aviso.
+   */
+  const retryPendingComment = useCallback(
+    async (options?: {
+      announceFailure?: boolean;
+      skipOnlineCheck?: boolean;
+    }): Promise<boolean> => {
+      const comment = pendingCommentRef.current.trim();
+      if (!order || !comment || savingComment || retryingCommentRef.current) return false;
+
+      if (
+        !options?.skipOnlineCheck &&
+        typeof navigator !== 'undefined' &&
+        navigator.onLine === false
+      ) {
+        if (options?.announceFailure) {
+          showToast(
+            'Sin conexión: el comentario sigue guardado en este dispositivo. Reintentá cuando vuelva la señal.',
+            'error',
+            7000,
+          );
+        }
+        return false;
+      }
+
+      retryingCommentRef.current = true;
+      setRetryingComment(true);
+
+      try {
+        const data = await api.put<OrderMutationResponse>(`/api/orders/${orderId}`, {
+          version: order.version ?? 0,
+          comment,
+        });
+
+        const nextVersion = data.order.version ?? order.version ?? 0;
+        setOrder((prev) =>
+          prev
+            ? {
+                ...prev,
+                version: nextVersion,
+                comments: data.order.comments ?? [
+                  ...(prev.comments ?? []),
+                  {
+                    text: comment,
+                    author: prev.createdBy,
+                    role: 'vendedor',
+                    createdAt: new Date().toISOString(),
+                  },
+                ],
+              }
+            : prev,
+        );
+
+        clearPendingComment();
+        setNewComment((current) => (current.trim() === comment ? '' : current));
+        showToast('Comentario pendiente sincronizado.', 'success');
+        return true;
+      } catch (err: unknown) {
+        if (!isNetworkError(err)) {
+          showToast(
+            err instanceof Error ? err.message : 'No se pudo sincronizar el comentario pendiente.',
+            'error',
+          );
+        } else if (options?.announceFailure) {
+          showToast(
+            isTimeoutError(err)
+              ? 'La conexión tardó demasiado: el comentario sigue guardado en este dispositivo.'
+              : 'Sin conexión: el comentario sigue guardado en este dispositivo.',
+            'error',
+            7000,
+          );
+        }
+        return false;
+      } finally {
+        retryingCommentRef.current = false;
+        setRetryingComment(false);
+      }
+    },
+    [clearPendingComment, order, orderId, savingComment, setOrder, showToast],
+  );
+
+  useEffect(() => {
+    const onOnline = () => {
+      // `navigator.onLine` puede seguir en false un instante después del
+      // evento `online`. Se intenta igual y, si la red aún no responde, el
+      // borrador permanece visible y el usuario puede reintentar.
+      void retryPendingComment({ skipOnlineCheck: true });
+    };
+
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
+  }, [retryPendingComment]);
+
   /**
    * Guardar un comentario no cambia la etapa ni navega: persiste el texto y
-   * actualiza la versión local para que el próximo guardado no dé 409.
+   * actualiza la versión local para que el próximo guardado no dé 409. Si no
+   * hay red, queda en localStorage y se reintenta al reconectar.
    */
   const handleSaveComment = async () => {
     if (!order || savingComment) return;
@@ -154,7 +329,25 @@ export default function VendorOrderDetail({
 
     setSavingComment(true);
 
+    const saveLocally = (message: string) => {
+      const saved = persistPendingComment(commentText);
+      showToast(
+        saved
+          ? message
+          : 'No se pudo guardar el comentario localmente. Revisá el almacenamiento del navegador.',
+        saved ? 'success' : 'error',
+        7000,
+      );
+    };
+
     try {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        saveLocally(
+          'Sin conexión: el comentario quedó guardado en este dispositivo y se enviará al recuperar la conexión.',
+        );
+        return;
+      }
+
       const data = await api.put<OrderMutationResponse>(`/api/orders/${orderId}`, {
         version: order.version ?? 0,
         comment: commentText,
@@ -178,9 +371,19 @@ export default function VendorOrderDetail({
           : prev,
       );
 
+      clearPendingComment();
       setNewComment('');
       showToast('¡Comentario agregado exitosamente!', 'success');
     } catch (err: unknown) {
+      if (isNetworkError(err) || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+        saveLocally(
+          isTimeoutError(err)
+            ? 'La conexión tardó demasiado: el comentario quedó guardado en este dispositivo y se enviará al recuperar la conexión.'
+            : 'Sin conexión: el comentario quedó guardado en este dispositivo y se enviará al recuperar la conexión.',
+        );
+        return;
+      }
+
       showToast(err instanceof Error ? err.message : 'Error al guardar el comentario', 'error');
     } finally {
       setSavingComment(false);
@@ -229,6 +432,15 @@ export default function VendorOrderDetail({
     }
   };
 
+  /**
+   * Atajo del banner de faltantes: lleva el panel de comentarios al centro de
+   * la pantalla y deja el textarea listo para tocar una respuesta rápida.
+   */
+  const handleReplyShortcut = () => {
+    commentsSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    commentTextareaRef.current?.focus({ preventScroll: true });
+  };
+
   if (loading) {
     return <OrderDetailSkeleton variant="vendor" />;
   }
@@ -264,16 +476,21 @@ export default function VendorOrderDetail({
     hasDifference: (item: OrderItemDTO) => orderLineHasShortage(item, order.status),
   };
   const lineFilterCounts = countOrderLineFilters(order.items, lineFilterPredicates);
+  const lineBrands = extractOrderLineBrands(order.items);
   const visibleItems = filterOrderLines(
     order.items,
-    { filter: lineFilter, query: lineSearch },
+    { filter: lineFilter, brandName: lineBrandFilter, query: lineSearch },
     lineFilterPredicates,
     (item) => item._id,
   );
   const showLineFilters = order.items.length > 5;
   // Si el atajo del resumen activa "faltantes" en un pedido corto, la barra
   // aparece igual para poder volver a "Todas" sin quedar atrapado en el filtro.
-  const showLineFilterBar = showLineFilters || lineFilter !== 'all' || lineSearch.trim() !== '';
+  const showLineFilterBar =
+    showLineFilters ||
+    lineFilter !== 'all' ||
+    lineBrandFilter !== 'all' ||
+    lineSearch.trim() !== '';
   const shortageCount = lineFilterCounts.difference;
   const showShortageSummary = order.status === 'paralizado' || shortageCount > 0;
   const shortageLabel =
@@ -430,15 +647,30 @@ export default function VendorOrderDetail({
                 </p>
               </div>
             </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setLineFilter('difference')}
-              data-testid="vendor-order-shortage-filter"
-              className="shrink-0"
-            >
-              Ver solo faltantes
-            </Button>
+            <div className="flex flex-wrap gap-2 sm:justify-end">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => {
+                  setLineBrandFilter('all');
+                  setLineFilter('difference');
+                }}
+                data-testid="vendor-order-shortage-filter"
+                className="shrink-0"
+              >
+                Ver solo faltantes
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={handleReplyShortcut}
+                data-testid="vendor-order-reply-shortcut"
+                className="shrink-0"
+              >
+                <MessageSquare className="h-4 w-4" aria-hidden="true" />
+                Responder en comentarios
+              </Button>
+            </div>
           </div>
         )}
 
@@ -454,6 +686,9 @@ export default function VendorOrderDetail({
               onFilterChange={setLineFilter}
               query={lineSearch}
               onQueryChange={setLineSearch}
+              brands={lineBrands}
+              brandFilter={lineBrandFilter}
+              onBrandFilterChange={setLineBrandFilter}
             />
           )}
 
@@ -462,21 +697,29 @@ export default function VendorOrderDetail({
               <div
                 key={item._id}
                 data-testid="vendor-order-item-card"
-                className="rounded-lg border border-border bg-surface-muted p-4"
+                className="cv-list-item cv-vendor-card rounded-lg border border-border bg-surface-muted p-4"
               >
                 <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <span className="font-mono text-xs text-muted">
-                      {item.productCode ?? item.productId?.code ?? '—'}
-                    </span>
-                    <h4 className="mt-0.5 text-sm font-medium text-foreground">
-                      {item.productName ?? item.productId?.name ?? 'Producto'}
-                    </h4>
-                    <span className="text-[11px] text-action-text">
-                      {item.brandName ?? item.productId?.brandId?.name ?? 'Sin marca'}
-                    </span>
+                  <div className="flex min-w-0 items-start gap-3">
+                    <ProductThumbnail
+                      src={item.productId?.imageUrl}
+                      alt={item.productName ?? item.productId?.name ?? 'Producto'}
+                      size={44}
+                      className="shrink-0"
+                    />
+                    <div className="min-w-0">
+                      <span className="font-mono text-xs text-muted">
+                        {item.productCode ?? item.productId?.code ?? '—'}
+                      </span>
+                      <h4 className="mt-0.5 text-sm font-medium text-foreground">
+                        {item.productName ?? item.productId?.name ?? 'Producto'}
+                      </h4>
+                      <span className="text-[11px] text-action-text">
+                        {item.brandName ?? item.productId?.brandId?.name ?? 'Sin marca'}
+                      </span>
+                    </div>
                   </div>
-                  <span className="text-sm font-semibold text-foreground">
+                  <span className="shrink-0 text-sm font-semibold text-foreground">
                     {money(item.lineTotal)}
                   </span>
                 </div>
@@ -541,15 +784,25 @@ export default function VendorOrderDetail({
                 </TableHead>
                 <TableBody>
                   {visibleItems.map((item) => (
-                    <TableRow key={item._id}>
+                    <TableRow key={item._id} className="cv-list-item cv-table-row">
                       <TableCell className="font-mono text-xs text-muted">
                         {item.productCode ?? item.productId?.code ?? '—'}
                       </TableCell>
                       <TableCell className="font-medium text-foreground">
-                        {item.productName ?? item.productId?.name ?? 'Producto'}
-                        <span className="block text-[11px] text-action-text">
-                          {item.brandName ?? item.productId?.brandId?.name ?? 'Sin marca'}
-                        </span>
+                        <div className="flex items-center gap-3">
+                          <ProductThumbnail
+                            src={item.productId?.imageUrl}
+                            alt={item.productName ?? item.productId?.name ?? 'Producto'}
+                            size={40}
+                            className="shrink-0"
+                          />
+                          <div className="min-w-0">
+                            {item.productName ?? item.productId?.name ?? 'Producto'}
+                            <span className="block text-[11px] text-action-text">
+                              {item.brandName ?? item.productId?.brandId?.name ?? 'Sin marca'}
+                            </span>
+                          </div>
+                        </div>
                       </TableCell>
                       <TableCell align="center" className="font-semibold">
                         {item.requestedQuantity}
@@ -592,14 +845,43 @@ export default function VendorOrderDetail({
           </div>
         </Card>
 
-        <CommentsPanel
-          comments={order.comments}
-          value={newComment}
-          onChange={setNewComment}
-          variant="vendor"
-          onSubmit={handleSaveComment}
-          submitting={savingComment}
-        />
+        {pendingComment && (
+          <div
+            className="flex items-center justify-between gap-3 rounded-lg border border-status-draft-border bg-status-draft-soft px-3 py-2"
+            data-testid="vendor-pending-comment"
+          >
+            <div className="min-w-0">
+              <p className="text-xs font-semibold text-status-draft">
+                Comentario pendiente de sincronizar
+              </p>
+              <p className="mt-0.5 text-[11px] text-status-draft">
+                Se enviará al recuperar la conexión. El texto se conserva en este dispositivo.
+              </p>
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void retryPendingComment({ announceFailure: true })}
+              disabled={savingComment || retryingComment}
+              className="min-h-11 shrink-0 px-3"
+              data-testid="vendor-retry-comment"
+            >
+              {retryingComment ? 'Enviando...' : 'Reintentar ahora'}
+            </Button>
+          </div>
+        )}
+
+        <div ref={commentsSectionRef} data-testid="vendor-order-comments">
+          <CommentsPanel
+            comments={order.comments}
+            value={newComment}
+            onChange={setNewComment}
+            variant="vendor"
+            onSubmit={handleSaveComment}
+            submitting={savingComment || retryingComment}
+            textareaRef={commentTextareaRef}
+          />
+        </div>
 
         <ConfirmDialog
           open={archiveDialogOpen}

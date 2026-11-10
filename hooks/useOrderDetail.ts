@@ -17,6 +17,7 @@ import {
   orderNotificationTargetsOrder,
   orderVersion,
 } from '@/lib/order-live-sync';
+import { useVisibilityRefresh } from '@/hooks/useVisibilityRefresh';
 import type { OrderDTO, OrderDetailResponse } from '@/lib/types';
 
 export interface UseOrderDetailOptions<T extends { _id: string }> {
@@ -247,27 +248,20 @@ export function useOrderDetail<T extends { _id: string } = OrderDTO>(
   }, [refresh]);
 
   // Puente SSE -> detalle: la campana ya filtró por rol y republicó el evento.
-  // Con la pestaña oculta no se consulta; el regreso a foco hace la puesta al día.
+  // Con la pestaña oculta no se consulta; el regreso a foco hace la puesta al
+  // día sólo si la ausencia fue relevante (más de 30 s).
   useEffect(() => {
-    const unsubscribe = subscribeToOrderNotifications((detail) => {
+    return subscribeToOrderNotifications((detail) => {
       if (!orderNotificationTargetsOrder(detail, orderId)) return;
       if (typeof document !== 'undefined' && document.hidden) return;
 
       void refreshRef.current();
     });
-
-    const handleVisibilityChange = () => {
-      if (typeof document !== 'undefined' && document.hidden) return;
-      void refreshRef.current();
-    };
-
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-
-    return () => {
-      unsubscribe();
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-    };
   }, [orderId]);
+
+  useVisibilityRefresh(() => {
+    void refreshRef.current();
+  });
 
   const applyPendingOrder = useCallback(() => {
     const remote = pendingOrderRef.current;

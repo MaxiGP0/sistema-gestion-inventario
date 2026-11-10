@@ -69,6 +69,7 @@ const SEARCH_INDEX_KEYS = [
   { searchAddress: 1 },
   { searchTokens: 1 },
 ];
+const SNAPSHOT_INDEX_KEY = { updatedAt: 1, _id: 1 };
 
 const prefixBranch = (field: string, normalizedTerm: string) => ({
   [field]: new RegExp(`^${normalizedTerm}`),
@@ -169,7 +170,7 @@ const fetchClients = async (query = '') => {
 
 test('normaliza mayúsculas, acentos y espacios para todas las claves', () => {
   assert.equal(normalizeSearchText('  GÓMEZ   Núñez  '), 'gomez nunez');
-  assert.equal(normalizeSearchText('Bagó'), 'bago');
+  assert.equal(normalizeSearchText('DermaPlus'), 'dermaplus');
   assert.equal(normalizeSearchText('ÑANDÚ'), 'nandu');
 
   assert.deepEqual(
@@ -199,8 +200,8 @@ test('el schema declara los índices de prefijo y conserva el único de code y e
 
   assert.deepEqual(
     declared.map(({ key }) => key),
-    [{ code: 1 }, { name: 1, _id: 1 }, ...SEARCH_INDEX_KEYS],
-    'debe haber un índice B-tree por cada campo normalizado',
+    [{ code: 1 }, { name: 1, _id: 1 }, ...SEARCH_INDEX_KEYS, SNAPSHOT_INDEX_KEY],
+    'debe haber un índice B-tree por cada campo normalizado y el del snapshot',
   );
   assert.equal(declared[0].options.unique, true, 'code debe seguir siendo único');
 });
@@ -315,8 +316,8 @@ test('syncIndexes() elimina el compuesto legacy y crea los índices de prefijo',
   assert.deepEqual(removed, ['name_text_code_1_localidad_1_province_1']);
   assert.deepEqual(
     created.map((index) => index.key),
-    SEARCH_INDEX_KEYS,
-    'debe crear un índice por campo normalizado',
+    [...SEARCH_INDEX_KEYS, SNAPSHOT_INDEX_KEY],
+    'debe crear un índice por campo normalizado y el del snapshot',
   );
 });
 
@@ -325,7 +326,11 @@ test('con todos los índices, syncIndexes() no pide crear ni eliminar nada', asy
     ID_INDEX,
     CODE_INDEX,
     LIST_INDEX,
-    ...SEARCH_INDEX_KEYS.map((key) => ({ v: 2, key, name: indexNameOf(key) })),
+    ...[...SEARCH_INDEX_KEYS, SNAPSHOT_INDEX_KEY].map((key) => ({
+      v: 2,
+      key,
+      name: indexNameOf(key),
+    })),
   ]);
 
   const { toCreate, toDrop } = await Client.diffIndexes();

@@ -59,6 +59,47 @@ export function findDepositItemByProductId<T extends DepositOrderItemLike>(
   return items.find((item) => String(item.productId?._id) === productId);
 }
 
+export interface DepositCatalogProductPresence {
+  inOrder: boolean;
+  quantity: number;
+  actionLabel: 'Agregar' | '+ Sumar';
+  badgeLabel?: string;
+}
+
+/**
+ * Estado de una fila del catálogo frente al pedido actual: si el producto ya
+ * está cargado se muestra la cantidad pedida y la acción pasa a "sumar".
+ */
+export function describeDepositCatalogProduct<T extends DepositOrderItemLike>(
+  items: readonly T[],
+  productId: string,
+): DepositCatalogProductPresence {
+  const item = findDepositItemByProductId(items, productId);
+  if (!item) {
+    return { inOrder: false, quantity: 0, actionLabel: 'Agregar' };
+  }
+
+  const quantity = Math.max(0, Math.trunc(item.requestedQuantity));
+  return {
+    inOrder: true,
+    quantity,
+    actionLabel: '+ Sumar',
+    badgeLabel: `En el pedido: ${quantity} u.`,
+  };
+}
+
+/**
+ * Anexa la página siguiente del catálogo sin duplicar productos: la búsqueda
+ * online y el snapshot offline pueden solaparse al paginar.
+ */
+export function appendDepositCatalogProducts<T extends { _id: string }>(
+  current: readonly T[],
+  next: readonly T[],
+): T[] {
+  const seen = new Set(current.map((product) => product._id));
+  return [...current, ...next.filter((product) => !seen.has(product._id))];
+}
+
 /**
  * Una línea sin `_id` todavía no fue guardada: se agregó en esta sesión de
  * depósito. Al sumar unidades su cantidad pedida también avanza.

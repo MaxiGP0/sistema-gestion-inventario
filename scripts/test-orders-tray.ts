@@ -101,6 +101,7 @@ test('los filtros iniciales se resuelven desde los query params', () => {
     status: 'all',
     datePreset: 'all',
     showArchived: false,
+    search: '',
   });
 
   assert.deepEqual(
@@ -108,12 +109,15 @@ test('los filtros iniciales se resuelven desde los query params', () => {
       status: 'paralizado',
       date: 'last7',
       archived: '1',
+      search: '  Farmacia Demo  ',
     }),
     {
       status: 'paralizado',
       datePreset: 'last7',
       showArchived: true,
+      search: 'Farmacia Demo',
     },
+    'el término de búsqueda se recorta y sobrevive al primer render',
   );
 
   assert.deepEqual(
@@ -126,8 +130,20 @@ test('los filtros iniciales se resuelven desde los query params', () => {
       status: 'all',
       datePreset: 'all',
       showArchived: false,
+      search: '',
     },
     'un estado de otra bandeja y una fecha desconocida caen a sus defaults',
+  );
+
+  assert.equal(
+    resolveOrdersTrayInitialFilters(deposit, { search: 'x'.repeat(120) }).search,
+    'x'.repeat(80),
+    'la búsqueda se acota a 80 caracteres',
+  );
+  assert.equal(
+    resolveOrdersTrayInitialFilters(deposit, { search: ['primero', 'segundo'] }).search,
+    'primero',
+    'con parámetros repetidos se usa el primero',
   );
 
   assert.equal(resolveOrdersTrayDatePreset(['month', 'today']), 'month');
@@ -139,9 +155,11 @@ test('los filtros iniciales se resuelven desde los query params', () => {
 });
 
 test('la URL de la bandeja sólo conserva los filtros activos', () => {
-  const current = new URLSearchParams('foo=bar&status=entregado&date=today&archived=1');
+  const current = new URLSearchParams(
+    'foo=bar&status=entregado&date=today&archived=1&search=Anterior',
+  );
   const cleared = buildOrdersTrayFilterSearchParams(
-    { status: 'all', datePreset: 'all', showArchived: false },
+    { status: 'all', datePreset: 'all', showArchived: false, search: '   ' },
     current,
   );
 
@@ -149,14 +167,27 @@ test('la URL de la bandeja sólo conserva los filtros activos', () => {
   assert.equal(cleared.has('status'), false);
   assert.equal(cleared.has('date'), false);
   assert.equal(cleared.has('archived'), false);
+  assert.equal(cleared.has('search'), false, 'una búsqueda vacía no ensucia la URL');
+
+  assert.equal(
+    buildOrdersTrayFilterSearchParams({
+      status: 'all',
+      datePreset: 'all',
+      showArchived: false,
+      search: '  Cliente Demo  ',
+    }).get('search'),
+    'Cliente Demo',
+    'el término se guarda recortado',
+  );
 
   assert.equal(
     buildOrdersTrayHref('/orders', {
       status: 'borrador',
       datePreset: 'today',
       showArchived: true,
+      search: 'Farmacia Demo',
     }),
-    '/orders?status=borrador&date=today&archived=1',
+    '/orders?status=borrador&date=today&archived=1&search=Farmacia+Demo',
   );
 });
 
@@ -171,7 +202,12 @@ test('el backHref del detalle recupera los filtros guardados de la pestaña', ()
 
   saveOrdersTrayFilters(
     '/orders/',
-    { status: 'paralizado', datePreset: 'last7', showArchived: true },
+    {
+      status: 'paralizado',
+      datePreset: 'last7',
+      showArchived: true,
+      search: '  Farmacia Demo  ',
+    },
     storage,
   );
 
@@ -179,10 +215,12 @@ test('el backHref del detalle recupera los filtros guardados de la pestaña', ()
     status: 'paralizado',
     datePreset: 'last7',
     showArchived: true,
+    search: 'Farmacia Demo',
   });
   assert.equal(
     getOrdersTrayBackHref('/orders', storage),
-    '/orders?status=paralizado&date=last7&archived=1',
+    '/orders?status=paralizado&date=last7&archived=1&search=Farmacia+Demo',
+    'Volver conserva la búsqueda además de estado, fecha y archivados',
   );
   assert.equal(
     getOrdersTrayBackHref('/deposit/orders', storage),

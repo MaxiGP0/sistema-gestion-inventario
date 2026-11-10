@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import dbConnect from '@/lib/mongodb';
 import { requireCurrentRole } from '@/lib/auth';
+import { buildProductSearchFields } from '@/lib/search-normalize';
 import { Product } from '@/models/Product';
 import { Brand } from '@/models/Brand';
 import { objectIdSchema, productSchema } from '@/lib/validations';
@@ -39,12 +40,19 @@ export const PUT = withRouteLogging(
           ? Number(priceWithIva)
           : Number((numPrice * 1.21).toFixed(2));
 
+      const trimmedCode = code.trim();
+      const trimmedName = name.trim();
       const updatedProduct = await Product.findByIdAndUpdate(
         id,
         {
           brandId,
-          code: code.trim(),
-          name: name.trim(),
+          code: trimmedCode,
+          name: trimmedName,
+          ...buildProductSearchFields({
+            code: trimmedCode,
+            name: trimmedName,
+            brandName: brand.name,
+          }),
           price: numPrice,
           priceWithIva: numPriceWithIva,
           imageUrl: imageUrl?.trim() || '',

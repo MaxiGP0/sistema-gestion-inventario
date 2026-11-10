@@ -3,12 +3,14 @@
  *
  * El catálogo acepta URLs de imagen provistas por proveedores (importación de
  * Excel o alta manual), así que no hay un único dominio conocido. Mantenemos
- * una lista explícita para no exponer el optimizador a cualquier host y, para
- * las URLs que no están listadas, `ProductThumbnail` usa `unoptimized`: la
- * imagen se sigue mostrando, pero el servidor no la descarga ni la reescala.
+ * una lista explícita para no exponer el optimizador a cualquier host. Las
+ * URLs que no están listadas no se descargan en el cliente: `ProductThumbnail`
+ * muestra el placeholder para no bajar el original en datos móviles.
  *
- * Al sumar un proveedor nuevo, agregar su hostname acá (y reiniciar el server
- * para que `next.config.ts` tome el cambio).
+ * Al sumar un proveedor nuevo, correr `npm run audit:image-hosts` contra la
+ * base real, agregar los hostnames detectados acá y reiniciar el server para
+ * que `next.config.ts` tome el cambio. No se agregan dominios de ejemplo:
+ * amplían la superficie del optimizador sin aportar imágenes reales.
  */
 export const OPTIMIZABLE_IMAGE_HOSTS = [
   'images.unsplash.com',
@@ -21,9 +23,14 @@ export const OPTIMIZABLE_IMAGE_HOSTS = [
   '*.mlstatic.com',
   '*.mercadolibre.com',
   '*.shopify.com',
+  // CDN de Tiendanube, habitual en catálogos de distribuidoras argentinas.
+  '**.mitiendanube.com',
+  '*.tiendanube.com',
+  // CDN de VTEX (assets de tiendas y marketplaces).
+  '*.vtexassets.com',
+  '*.vteximg.com.br',
   '*.inventario.example.com',
   'inventario.example.com',
-  'example.com',
 ] as const;
 
 /** Patrones equivalentes para `images.remotePatterns` en next.config.ts. */
@@ -54,15 +61,24 @@ function hostMatchesPattern(hostname: string, pattern: string): boolean {
   return false;
 }
 
+/** Indica si un hostname (sin protocolo ni path) está en la allowlist. */
+export function isOptimizableImageHostname(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase();
+  if (!normalized) return false;
+  return OPTIMIZABLE_IMAGE_HOSTS.some((pattern) => hostMatchesPattern(normalized, pattern));
+}
+
 /**
  * Indica si una URL puede optimizarse con la configuración de next.config.ts.
  *
  * Las rutas locales (`/uploads/...`) siempre se optimizan. Las URLs `data:` y
- * `blob:` no pasan por el optimizador y deben renderizarse con `unoptimized`.
+ * `blob:` no pasan por el optimizador y se muestran como placeholder.
  */
 export function isOptimizableImageUrl(src: string): boolean {
   if (!src) return false;
-  if (src.startsWith('/')) return true;
+  if (src.startsWith('/')) {
+    return !src.startsWith('//') && !/[\\\u0000-\u001f\u007f]/.test(src);
+  }
   if (src.startsWith('data:') || src.startsWith('blob:')) return false;
 
   let url: URL;
@@ -74,6 +90,5 @@ export function isOptimizableImageUrl(src: string): boolean {
 
   if (url.protocol !== 'https:') return false;
 
-  const hostname = url.hostname.toLowerCase();
-  return OPTIMIZABLE_IMAGE_HOSTS.some((pattern) => hostMatchesPattern(hostname, pattern));
+  return isOptimizableImageHostname(url.hostname);
 }

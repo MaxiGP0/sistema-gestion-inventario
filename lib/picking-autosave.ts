@@ -28,6 +28,11 @@ export interface PickingAutosaveSnapshot {
   /** Epoch ms del último autosave. */
   savedAt: number;
   items: PickingState;
+  /**
+   * Comentario que no pudo enviarse por falta de red/timeout. Se conserva para
+   * mostrarlo al reabrir el pedido y enviarlo con el próximo PUT de picking.
+   */
+  pendingComment?: string;
 }
 
 export interface PickingAutosaveStorage {
@@ -52,6 +57,10 @@ export function getPickingAutosaveStorageKey(userId: string, orderId: string): s
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function sanitizePendingComment(value: unknown): string {
+  return typeof value === 'string' ? value.trim().slice(0, 2000) : '';
 }
 
 function sanitizeState(value: unknown): PickingState {
@@ -193,7 +202,8 @@ export function parsePickingAutosave(raw: string | null): PickingAutosaveSnapsho
   if (typeof parsed.savedAt !== 'number' || !Number.isFinite(parsed.savedAt)) return null;
 
   const items = sanitizeState(parsed.items);
-  if (Object.keys(items).length === 0) return null;
+  const pendingComment = sanitizePendingComment(parsed.pendingComment);
+  if (Object.keys(items).length === 0 && !pendingComment) return null;
 
   return {
     orderId: parsed.orderId.trim(),
@@ -201,6 +211,7 @@ export function parsePickingAutosave(raw: string | null): PickingAutosaveSnapsho
     version: Math.floor(parsed.version),
     savedAt: Math.floor(parsed.savedAt),
     items,
+    ...(pendingComment ? { pendingComment } : {}),
   };
 }
 
@@ -277,6 +288,36 @@ export function clearPickingAutosave(
 
   try {
     storage.removeItem(key);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Quita sólo el comentario pendiente y conserva el control sin guardar.
+ * Si el snapshot quedó vacío (sin líneas ni comentario), elimina la clave.
+ */
+export function clearPickingAutosaveComment(
+  storage: PickingAutosaveStorage | null | undefined,
+  userId: string | null | undefined,
+  orderId: string | null | undefined,
+): boolean {
+  const key = storageKeyFor(userId, orderId);
+  if (!storage || !key) return false;
+
+  try {
+    const snapshot = parsePickingAutosave(storage.getItem(key));
+    if (!snapshot?.pendingComment) return false;
+
+    const rest: PickingAutosaveSnapshot = { ...snapshot };
+    delete rest.pendingComment;
+
+    if (Object.keys(rest.items).length === 0) {
+      storage.removeItem(key);
+    } else {
+      storage.setItem(key, JSON.stringify(rest));
+    }
     return true;
   } catch {
     return false;

@@ -18,6 +18,7 @@ import { useToast } from '@/context/ToastContext';
 import AppShell from '@/components/app-shell/AppShell';
 import CommentsPanel from '@/components/CommentsPanel';
 import ConfirmDialog from '@/components/ConfirmDialog';
+import KeepAwakeToggle from '@/components/KeepAwakeToggle';
 import StatusBadge from '@/components/StatusBadge';
 import Button from '@/components/ui/Button';
 import Card from '@/components/ui/Card';
@@ -27,6 +28,7 @@ import OrderLineFilters from '@/components/orders/OrderLineFilters';
 import OrderPrintLink from '@/components/orders/OrderPrintLink';
 import OrderShareButtons from '@/components/orders/OrderShareButtons';
 import OrderStaleVersionBanner from '@/components/orders/OrderStaleVersionBanner';
+import ProductThumbnail from '@/components/ProductThumbnail';
 import { useMobileKeyboardFocus } from '@/hooks/useVisualViewport';
 import {
   Table,
@@ -41,6 +43,7 @@ import {
   billingLineQuantity as lineQuantity,
   billingPendingDetail as pendingDetailOf,
   formatBillingItemLine,
+  isMissingLine,
   MISSING_LINE_LABEL,
 } from '@/lib/billing-order-format';
 import {
@@ -50,6 +53,7 @@ import {
 } from '@/lib/billing-discounts';
 import {
   countOrderLineFilters,
+  extractOrderLineBrands,
   filterOrderLines,
   type OrderLineFilter,
 } from '@/lib/order-line-filter';
@@ -67,23 +71,46 @@ import {
   type PostControlWireUpdate,
 } from '@/lib/post-control-queue';
 import {
+  clearPostControlPending,
+  loadPostControlPending,
+  mergePostControlPending,
+  removePostControlPendingItems,
+} from '@/lib/post-control-autosave';
+import {
   buildMarkAllOkUpdates,
   buildRestorePostControlUpdates,
   snapshotPostControls,
   type PostControlSnapshot,
   type PostControlUpdate,
 } from '@/lib/post-control-bulk';
+import { copyTextToClipboard } from '@/lib/clipboard';
+import { vibrateOnTap } from '@/lib/haptics';
 import { formatInvoiceType, formatPaymentCondition } from '@/lib/order-commercial';
 import { getOrdersTrayBackHref } from '@/lib/orders-tray';
 import { markOrdersTrayForRefresh } from '@/lib/orders-tray-refresh';
 import { useOrderDetail } from '@/hooks/useOrderDetail';
 import { orderVersion } from '@/lib/order-live-sync';
-import { api } from '@/lib/api-client';
+import { api, isNetworkError, isTimeoutError } from '@/lib/api-client';
+import {
+  clearPendingOrderComment,
+  loadPendingOrderComment,
+  savePendingOrderComment,
+} from '@/lib/pending-order-comment';
 import type { UserRole } from '@/lib/authz';
 import type { OrderDTO, OrderMutationResponse, OrderPostControlResponse } from '@/lib/types';
 
 /** Pedido completo: DTO compartido con la API. */
 type Order = OrderDTO;
+
+/** localStorage puede no estar disponible (SSR o modo privado). */
+function resolveLocalStorage(): Storage | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
 
 function PostControlSelector({
   value,
@@ -145,6 +172,8 @@ function PostControlSelector({
 
 interface BillingOrderClientProps {
   orderId: string;
+  /** Dueño del borrador local de comentarios. */
+  userId: string;
   role: UserRole;
   username: string;
   /** Pedido resuelto en el servidor; evita el spinner y el GET de montaje. */
@@ -155,6 +184,7 @@ interface BillingOrderClientProps {
 
 export default function BillingOrderClient({
   orderId: id,
+  userId,
   role,
   username,
   initialOrder,
@@ -172,7 +202,19 @@ export default function BillingOrderClient({
   const [confirmBulkOpen, setConfirmBulkOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [newComment, setNewComment] = useState('');
+  const [pendingComment, setPendingComment] = useState('');
+  const [retryingComment, setRetryingComment] = useState(false);
+  const retryingCommentRef = useRef(false);
+  // Control post-factura que falló por red/timeout y vive en localStorage.
+  const [pendingPostControls, setPendingPostControls] = useState<Record<string, PostControl>>({});
+  const [retryingPostControls, setRetryingPostControls] = useState(false);
+  const pendingPostControlsRef = useRef<Record<string, PostControl>>({});
+  const pendingPostControlPreviousRef = useRef<Record<string, PostControl>>({});
+  const retryingPostControlsRef = useRef(false);
+  const lastPostControlAttemptVersionRef = useRef<number | null>(null);
+  const pendingPostControlHydratedRef = useRef<string | null>(null);
   const [lineFilter, setLineFilter] = useState<OrderLineFilter>('all');
+  const [lineBrandFilter, setLineBrandFilter] = useState('all');
   const [lineSearch, setLineSearch] = useState('');
   const [pinnedItemKey, setPinnedItemKey] = useState<string | null>(null);
   const [isNavigating, startTransition] = useTransition();
@@ -182,6 +224,7 @@ export default function BillingOrderClient({
   const versionRef = useRef(initialOrder?.version ?? 0);
   const postControlQueueRef = useRef<PostControlWriteQueue | null>(null);
   const hasLocalChangesRef = useRef(false);
+  const copyResetTimerRef = useRef<number | null>(null);
 
   const { order, setOrder, loading, error, pendingOrder, applyPendingOrder } =
     useOrderDetail<Order>(id, {
@@ -206,13 +249,24 @@ export default function BillingOrderClient({
       },
     });
 
+  useEffect(() => {
+    return () => {
+      if (copyResetTimerRef.current !== null) {
+        window.clearTimeout(copyResetTimerRef.current);
+        copyResetTimerRef.current = null;
+      }
+    };
+  }, []);
+
   // Se muestran todas las líneas, incluidas las que quedaron en 0 por no
-  // haber sido controladas en depósito: son faltantes y deben verse.
+  // haber sido controladas en depósito: son faltantes y deben verse. Una
+  // línea con cantidad controlada y 100% de descuento no es faltante.
   const billingItems = order?.items ?? [];
   const discountSummary = summarizeBillingDiscounts(billingItems);
-  const missingItems = billingItems.filter((item) => item.lineTotal === 0);
+  const missingItems = billingItems.filter(isMissingLine);
   const pendingControlCount = countUncontrolledPostItems(billingItems);
   const hasPendingPostControlWrites = savingPostControlIds.size > 0;
+  const pendingPostControlCount = Object.keys(pendingPostControls).length;
   const canControlLines =
     order?.status === 'facturacion' || order?.status === 'control_post_factura';
   const currentVersion = orderVersion(order);
@@ -226,14 +280,19 @@ export default function BillingOrderClient({
    */
   const pinActiveLine = useCallback(
     (itemId: string) => {
-      setPinnedItemKey(lineFilter === 'all' ? null : itemId);
+      setPinnedItemKey(lineFilter === 'all' && lineBrandFilter === 'all' ? null : itemId);
     },
-    [lineFilter],
+    [lineBrandFilter, lineFilter],
   );
 
   const handleLineFilterChange = useCallback((next: OrderLineFilter) => {
     setPinnedItemKey(null);
     setLineFilter(next);
+  }, []);
+
+  const handleLineBrandFilterChange = useCallback((next: string) => {
+    setPinnedItemKey(null);
+    setLineBrandFilter(next);
   }, []);
 
   const handleLineSearchChange = useCallback((next: string) => {
@@ -247,27 +306,192 @@ export default function BillingOrderClient({
   useEffect(() => {
     hasLocalChangesRef.current =
       hasPendingPostControlWrites ||
+      pendingPostControlCount > 0 ||
       savingComment ||
       submitting ||
       bulkSaving ||
       Boolean(newComment.trim()) ||
       (postControlQueueRef.current?.size ?? 0) > 0;
-  }, [bulkSaving, hasPendingPostControlWrites, newComment, savingComment, submitting]);
+  }, [
+    bulkSaving,
+    hasPendingPostControlWrites,
+    newComment,
+    pendingPostControlCount,
+    savingComment,
+    submitting,
+  ]);
+
+  const persistPendingComment = useCallback(
+    (text: string) => {
+      const comment = text.trim();
+      if (!comment) return false;
+
+      const saved = savePendingOrderComment(resolveLocalStorage(), {
+        orderId: id,
+        userId,
+        text: comment,
+        savedAt: Date.now(),
+      });
+
+      if (saved) setPendingComment(comment);
+      return saved;
+    },
+    [id, userId],
+  );
+
+  const clearPendingComment = useCallback(() => {
+    clearPendingOrderComment(resolveLocalStorage(), userId, id);
+    setPendingComment('');
+  }, [id, userId]);
+
+  // Al reabrir el pedido se muestra el comentario que quedó sin sincronizar.
+  useEffect(() => {
+    const draft = loadPendingOrderComment(resolveLocalStorage(), userId, id);
+    if (!draft) return;
+
+    setPendingComment(draft.text);
+    setNewComment((current) => current || draft.text);
+  }, [id, userId]);
+
+  // Si el operario edita el texto después de un fallo, el borrador local
+  // conserva la última versión para reintentarla tal cual.
+  useEffect(() => {
+    if (!pendingComment) return;
+
+    const edited = newComment.trim();
+    if (!edited || edited === pendingComment) return;
+
+    persistPendingComment(edited);
+  }, [newComment, pendingComment, persistPendingComment]);
+
+  // Al reabrir el pedido se recupera el control post-factura que quedó sin
+  // sincronizar. Se pinta de inmediato para que el operario no vea retroceder
+  // las líneas que ya había controlado antes del corte de red.
+  useEffect(() => {
+    if (!order || pendingPostControlHydratedRef.current === id) return;
+    pendingPostControlHydratedRef.current = id;
+
+    const snapshot = loadPostControlPending(resolveLocalStorage(), {
+      orderId: id,
+      userId,
+    });
+    if (!snapshot) return;
+
+    pendingPostControlsRef.current = snapshot.items;
+    pendingPostControlPreviousRef.current = snapshot.previous;
+    setPendingPostControls(snapshot.items);
+    hasLocalChangesRef.current = true;
+
+    setOrder((prev) =>
+      prev
+        ? {
+            ...prev,
+            items: prev.items.map((item) => {
+              const pendingControl = snapshot.items[item._id];
+              return pendingControl ? { ...item, postControl: pendingControl } : item;
+            }),
+          }
+        : prev,
+    );
+  }, [id, order, setOrder, userId]);
+
+  /**
+   * Reintenta el comentario pendiente sin tocar el estado del pedido. Se usa al
+   * recuperar conexión y también al guardar el estado (ese PUT lo envía).
+   */
+  const retryPendingComment = useCallback(
+    async (options?: { announceFailure?: boolean }): Promise<boolean> => {
+      const comment = pendingComment.trim();
+      if (!comment || retryingCommentRef.current || savingComment || submitting) return false;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        if (options?.announceFailure) {
+          showToast(
+            'Sin conexión: el comentario sigue guardado en este dispositivo. Reintentá cuando vuelva la señal.',
+            'error',
+            7000,
+          );
+        }
+        return false;
+      }
+
+      retryingCommentRef.current = true;
+      setRetryingComment(true);
+
+      try {
+        const data = await api.put<OrderMutationResponse>(`/api/orders/${id}`, {
+          version: versionRef.current,
+          comment,
+        });
+
+        const nextVersion = data.order.version ?? versionRef.current;
+        versionRef.current = nextVersion;
+
+        setOrder((prev) =>
+          prev
+            ? {
+                ...prev,
+                version: nextVersion,
+                comments: data.order.comments ?? [
+                  ...(prev.comments ?? []),
+                  {
+                    text: comment,
+                    author: 'Facturación',
+                    role: 'billing',
+                    createdAt: new Date().toISOString(),
+                  },
+                ],
+              }
+            : prev,
+        );
+
+        clearPendingComment();
+        setNewComment((current) => (current.trim() === comment ? '' : current));
+        showToast('Comentario pendiente sincronizado.', 'success');
+        return true;
+      } catch (err: unknown) {
+        if (!isNetworkError(err)) {
+          showToast(
+            err instanceof Error ? err.message : 'No se pudo sincronizar el comentario pendiente.',
+            'error',
+          );
+        } else if (options?.announceFailure) {
+          showToast(
+            isTimeoutError(err)
+              ? 'La conexión tardó demasiado: el comentario sigue guardado en este dispositivo.'
+              : 'Sin conexión: el comentario sigue guardado en este dispositivo.',
+            'error',
+            7000,
+          );
+        }
+        return false;
+      } finally {
+        retryingCommentRef.current = false;
+        setRetryingComment(false);
+      }
+    },
+    [clearPendingComment, id, pendingComment, savingComment, setOrder, showToast, submitting],
+  );
 
   const lineFilterPredicates = {
     isPending: (item: OrderDTO['items'][number]) => isPostControlPending(item),
     hasDifference: (item: OrderDTO['items'][number]) =>
-      item.lineTotal === 0 ||
+      isMissingLine(item) ||
       Boolean(item.pendingReason?.trim()) ||
       resolvePostControl(item.postControl) === 'diferencia',
   };
   const lineFilterCounts = countOrderLineFilters(billingItems, lineFilterPredicates);
+  const lineBrands = extractOrderLineBrands(billingItems);
   const showLineFilters = billingItems.length > 5;
   const pinnedLineKeys = pinnedItemKey ? new Set([pinnedItemKey]) : undefined;
   const visibleBillingItems = showLineFilters
     ? filterOrderLines(
         billingItems,
-        { filter: lineFilter, query: lineSearch, pinnedKeys: pinnedLineKeys },
+        {
+          filter: lineFilter,
+          brandName: lineBrandFilter,
+          query: lineSearch,
+          pinnedKeys: pinnedLineKeys,
+        },
         lineFilterPredicates,
         (item) => item._id,
       )
@@ -324,8 +548,47 @@ export default function BillingOrderClient({
     [],
   );
 
+  const clearPendingPostControlState = useCallback(() => {
+    clearPostControlPending(resolveLocalStorage(), userId, id);
+    pendingPostControlsRef.current = {};
+    pendingPostControlPreviousRef.current = {};
+    setPendingPostControls({});
+  }, [id, userId]);
+
   const handlePostControlQueueError = useCallback(
     (failed: readonly PostControlSyncUpdate[], error: unknown) => {
+      // Un corte de red no revierte la pintura: el operario conserva el OK o
+      // Diferencia que acaba de marcar y el lote queda en este dispositivo.
+      if (isNetworkError(error)) {
+        const snapshot = mergePostControlPending(resolveLocalStorage(), {
+          orderId: id,
+          userId,
+          version: lastPostControlAttemptVersionRef.current ?? versionRef.current,
+          changes: failed,
+        });
+
+        if (snapshot) {
+          pendingPostControlsRef.current = snapshot.items;
+          pendingPostControlPreviousRef.current = snapshot.previous;
+          setPendingPostControls(snapshot.items);
+          showToast(
+            isTimeoutError(error)
+              ? 'La conexión tardó demasiado: el control quedó guardado en este dispositivo y se enviará al recuperar la señal.'
+              : 'Sin conexión: el control quedó guardado en este dispositivo y se enviará al recuperar la conexión.',
+            'error',
+            7000,
+          );
+          return;
+        }
+
+        // Si el ida y vuelta dejó la línea como estaba, la UI ya coincide con
+        // el servidor y no hay nada que reintentar.
+        const hasNetChange = failed.some((change) => change.postControl !== change.previous);
+        if (!hasNetChange) return;
+      }
+
+      // Error de negocio (400/403/409) o storage no disponible: se vuelve al
+      // valor anterior para que la UI no muestre un control que no existe.
       const previousById = new Map(failed.map((change) => [change.itemId, change.previous]));
 
       setOrder((prev) =>
@@ -342,15 +605,20 @@ export default function BillingOrderClient({
       );
 
       showToast(
-        error instanceof Error ? error.message : 'No se pudo guardar el control post-factura.',
+        isNetworkError(error)
+          ? 'No se pudo guardar el control localmente. Revisá el almacenamiento del navegador e intentá de nuevo.'
+          : error instanceof Error
+            ? error.message
+            : 'No se pudo guardar el control post-factura.',
         'error',
       );
     },
-    [setOrder, showToast],
+    [id, setOrder, showToast, userId],
   );
 
   const sendPostControlBatch = useCallback(
     async (updates: PostControlWireUpdate[], version: number) => {
+      lastPostControlAttemptVersionRef.current = version;
       const data = await api.patch<OrderPostControlResponse>(`/api/orders/${id}/post-control`, {
         version,
         items: updates,
@@ -359,11 +627,37 @@ export default function BillingOrderClient({
       const nextVersion = data.order.version ?? version + 1;
       versionRef.current = nextVersion;
       setOrder((prev) => (prev ? { ...prev, version: nextVersion } : prev));
+
+      // Si el operario volvió a tocar una línea que estaba pendiente y este
+      // PATCH la guardó, se quita del snapshot para que un reintento posterior
+      // no reaplique el valor viejo.
+      if (Object.keys(pendingPostControlsRef.current).length > 0) {
+        const syncedIds = updates.map((update) => update._id);
+        const remaining = removePostControlPendingItems(
+          resolveLocalStorage(),
+          userId,
+          id,
+          syncedIds,
+          { version: nextVersion, savedAt: Date.now() },
+        );
+
+        if (!remaining) {
+          // O no quedaba nada de esas líneas o el snapshot quedó vacío.
+          pendingPostControlsRef.current = {};
+          pendingPostControlPreviousRef.current = {};
+          setPendingPostControls({});
+        } else {
+          pendingPostControlsRef.current = remaining.items;
+          pendingPostControlPreviousRef.current = remaining.previous;
+          setPendingPostControls(remaining.items);
+        }
+      }
+
       // Un cambio puntual invalida el "Deshacer" masivo: revertir también
       // desharía esta edición manual.
       setUndoControls(null);
     },
-    [id, setOrder],
+    [id, setOrder, userId],
   );
 
   useEffect(() => {
@@ -381,8 +675,124 @@ export default function BillingOrderClient({
     };
   }, [handlePostControlQueueError, handlePostControlSavingChange, sendPostControlBatch]);
 
+  /**
+   * Reenvía el lote que quedó en localStorage. Un único ref evita dos PATCH
+   * concurrentes cuando el evento `online`, el botón y el cierre del pedido se
+   * disparan casi al mismo tiempo.
+   */
+  const retryPendingPostControls = useCallback(
+    async (options?: { announceFailure?: boolean }): Promise<boolean> => {
+      const entries = Object.entries(pendingPostControlsRef.current);
+      if (entries.length === 0) return true;
+      if (retryingPostControlsRef.current) return false;
+
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        if (options?.announceFailure) {
+          showToast(
+            'Sin conexión: el control post-factura sigue pendiente. Reintentá cuando vuelva la señal.',
+            'error',
+            7000,
+          );
+        }
+        return false;
+      }
+
+      retryingPostControlsRef.current = true;
+      setRetryingPostControls(true);
+
+      try {
+        const data = await api.patch<OrderPostControlResponse>(`/api/orders/${id}/post-control`, {
+          version: versionRef.current,
+          items: entries.map(([itemId, postControl]) => ({
+            _id: itemId,
+            postControl,
+          })),
+        });
+
+        mergePostControlResponse(data);
+        clearPendingPostControlState();
+        showToast('Control post-factura pendiente sincronizado.', 'success');
+        return true;
+      } catch (error: unknown) {
+        if (isNetworkError(error)) {
+          if (options?.announceFailure) {
+            showToast(
+              isTimeoutError(error)
+                ? 'La conexión tardó demasiado: el control sigue guardado en este dispositivo.'
+                : 'Sin conexión: el control sigue guardado en este dispositivo.',
+              'error',
+              7000,
+            );
+          }
+          return false;
+        }
+
+        // El servidor rechazó el lote (400/403/409): se descarta lo pendiente y
+        // se vuelve al valor previo para no mostrar un control inexistente.
+        const previousById = pendingPostControlPreviousRef.current;
+        setOrder((prev) =>
+          prev
+            ? {
+                ...prev,
+                items: prev.items.map((item) => {
+                  const previousControl = previousById[item._id];
+                  return previousControl ? { ...item, postControl: previousControl } : item;
+                }),
+              }
+            : prev,
+        );
+        clearPendingPostControlState();
+        showToast(
+          error instanceof Error
+            ? error.message
+            : 'No se pudo sincronizar el control post-factura pendiente.',
+          'error',
+        );
+        return false;
+      } finally {
+        retryingPostControlsRef.current = false;
+        setRetryingPostControls(false);
+      }
+    },
+    [clearPendingPostControlState, id, mergePostControlResponse, setOrder, showToast],
+  );
+
+  // Si la app se reabrió ya con conexión, no habrá evento `online`: se hace un
+  // único intento al montar para no dejar el lote esperando un toque manual.
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || navigator.onLine === false) return;
+    if (Object.keys(pendingPostControlsRef.current).length === 0) return;
+
+    void retryPendingPostControls();
+  }, [id, retryPendingPostControls]);
+
+  // Al recuperar conexión se reenvía primero el control (un PATCH) y después
+  // el comentario (un PUT) para que ambos usen la versión más reciente.
+  useEffect(() => {
+    const onOnline = () => {
+      void (async () => {
+        await retryPendingPostControls();
+        // Si otro reintento del control sigue en curso, no se lanza el PUT del
+        // comentario en paralelo: ambos comparten la versión del pedido.
+        if (Object.keys(pendingPostControlsRef.current).length > 0) return;
+        await retryPendingComment();
+      })();
+    };
+
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
+  }, [retryPendingComment, retryPendingPostControls]);
+
   const handleUpdateStatus = async (newStatus: string) => {
-    if (!order || submitting || savingComment || isNavigating || hasPendingPostControlWrites)
+    if (
+      !order ||
+      submitting ||
+      savingComment ||
+      retryingComment ||
+      retryingPostControls ||
+      isNavigating ||
+      hasPendingPostControlWrites
+    )
       return;
 
     // Doble barrera además del botón deshabilitado: el servidor también lo
@@ -395,12 +805,31 @@ export default function BillingOrderClient({
       return;
     }
 
+    // El cierre del pedido nunca debe dejar atrás un control que sólo vive en
+    // este dispositivo: se sincroniza antes del PUT de estado.
+    if (Object.keys(pendingPostControlsRef.current).length > 0) {
+      const synced = await retryPendingPostControls();
+      if (!synced) {
+        showToast(
+          'Hay un control post-factura pendiente de sincronizar. Reintentá cuando vuelva la señal antes de cerrar el pedido.',
+          'error',
+          7000,
+        );
+        return;
+      }
+    }
+
     setSubmitting(true);
+
+    const pending = pendingComment.trim();
 
     try {
       const data = await api.put<OrderMutationResponse>(`/api/orders/${id}`, {
         version: versionRef.current,
         status: newStatus,
+        // El cambio de estado también reintenta el comentario que había
+        // quedado sin sincronizar.
+        ...(pending ? { comment: pending } : {}),
       });
 
       const nextVersion = data.order.version ?? versionRef.current;
@@ -411,9 +840,15 @@ export default function BillingOrderClient({
               ...prev,
               status: data.order.status ?? prev.status,
               version: nextVersion,
+              comments: data.order.comments ?? prev.comments,
             }
           : prev,
       );
+
+      if (pending) {
+        clearPendingComment();
+        setNewComment((current) => (current.trim() === pending ? '' : current));
+      }
 
       showToast(`¡Estado actualizado a: ${newStatus.toUpperCase()}!`, 'success');
 
@@ -422,8 +857,17 @@ export default function BillingOrderClient({
       markOrdersTrayForRefresh('/billing/orders');
       startTransition(() => router.push('/billing/orders'));
     } catch (err: unknown) {
-      const error = err as Error;
-      showToast(error.message, 'error');
+      if (isNetworkError(err)) {
+        showToast(
+          isTimeoutError(err)
+            ? 'La conexión tardó demasiado: no se pudo actualizar el estado. Reintentá cuando vuelva la señal.'
+            : 'Sin conexión: no se pudo actualizar el estado. Reintentá cuando vuelva la conexión.',
+          'error',
+          7000,
+        );
+      } else {
+        showToast(err instanceof Error ? err.message : 'No se pudo actualizar el estado', 'error');
+      }
     } finally {
       setSubmitting(false);
     }
@@ -434,14 +878,41 @@ export default function BillingOrderClient({
    * y actualiza la versión local para que el siguiente guardado no dé 409.
    */
   const handleSaveComment = async () => {
-    if (!order || savingComment || submitting || bulkSaving || hasPendingPostControlWrites) return;
+    if (
+      !order ||
+      savingComment ||
+      submitting ||
+      bulkSaving ||
+      retryingComment ||
+      retryingPostControls ||
+      hasPendingPostControlWrites
+    )
+      return;
 
     const commentText = newComment.trim();
     if (!commentText) return;
 
     setSavingComment(true);
 
+    const saveLocally = (message: string) => {
+      const saved = persistPendingComment(commentText);
+      showToast(
+        saved
+          ? message
+          : 'No se pudo guardar el comentario localmente. Revisá el almacenamiento del navegador.',
+        saved ? 'success' : 'error',
+        7000,
+      );
+    };
+
     try {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        saveLocally(
+          'Sin conexión: el comentario quedó guardado en este dispositivo y se enviará al recuperar la conexión o al guardar el estado.',
+        );
+        return;
+      }
+
       const data = await api.put<OrderMutationResponse>(`/api/orders/${id}`, {
         version: versionRef.current,
         comment: commentText,
@@ -468,11 +939,20 @@ export default function BillingOrderClient({
           : prev,
       );
 
+      clearPendingComment();
       setNewComment('');
       showToast('¡Comentario agregado exitosamente!', 'success');
     } catch (err: unknown) {
-      const error = err as Error;
-      showToast(error.message, 'error');
+      if (isNetworkError(err) || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+        saveLocally(
+          isTimeoutError(err)
+            ? 'La conexión tardó demasiado: el comentario quedó guardado en este dispositivo y se enviará al recuperar la conexión o al guardar el estado.'
+            : 'Sin conexión: el comentario quedó guardado en este dispositivo y se enviará al recuperar la conexión o al guardar el estado.',
+        );
+        return;
+      }
+
+      showToast(err instanceof Error ? err.message : 'Error al guardar el comentario', 'error');
     } finally {
       setSavingComment(false);
     }
@@ -484,7 +964,7 @@ export default function BillingOrderClient({
    * no bloquea la UI ni produce 409 falsos.
    */
   const handleSetPostControl = (itemId: string, postControl: PostControl) => {
-    if (!order || bulkSaving || savingComment) return;
+    if (!order || bulkSaving || savingComment || retryingComment || retryingPostControls) return;
 
     pinActiveLine(itemId);
 
@@ -493,6 +973,8 @@ export default function BillingOrderClient({
 
     const previous = resolvePostControl(item.postControl);
     if (previous === postControl) return;
+
+    vibrateOnTap();
 
     setOrder((prev) =>
       prev
@@ -512,8 +994,11 @@ export default function BillingOrderClient({
   /** El operario acepta descartar su control local y seguir con el servidor. */
   const handleLoadLatestVersion = useCallback(() => {
     hasLocalChangesRef.current = false;
+    // Cargar la versión del servidor descarta explícitamente el lote post-factura
+    // local; si no, el banner seguiría ofreciendo reintentarlo.
+    clearPendingPostControlState();
     applyPendingOrder();
-  }, [applyPendingOrder]);
+  }, [applyPendingOrder, clearPendingPostControlState]);
 
   const applyBulkPostControl = async (updates: PostControlUpdate[], message: string) => {
     if (
@@ -521,9 +1006,25 @@ export default function BillingOrderClient({
       updates.length === 0 ||
       bulkSaving ||
       savingComment ||
+      retryingComment ||
+      retryingPostControls ||
       hasPendingPostControlWrites
     )
       return false;
+
+    // Un lote pendiente en el dispositivo comparte la versión del pedido: se
+    // sincroniza antes de aplicar la acción masiva.
+    if (Object.keys(pendingPostControlsRef.current).length > 0) {
+      const synced = await retryPendingPostControls();
+      if (!synced) {
+        showToast(
+          'Hay un control post-factura pendiente de sincronizar. Reintentá cuando vuelva la señal.',
+          'error',
+          7000,
+        );
+        return false;
+      }
+    }
 
     setBulkSaving(true);
     try {
@@ -536,8 +1037,16 @@ export default function BillingOrderClient({
       showToast(message, 'success');
       return true;
     } catch (err: unknown) {
-      const error = err as Error;
-      showToast(error.message, 'error');
+      showToast(
+        isNetworkError(err)
+          ? isTimeoutError(err)
+            ? 'La conexión tardó demasiado: no se pudo guardar el control masivo. Reintentá cuando vuelva la señal.'
+            : 'Sin conexión: no se pudo guardar el control masivo. Reintentá cuando vuelva la conexión.'
+          : err instanceof Error
+            ? err.message
+            : 'No se pudo guardar el control masivo.',
+        'error',
+      );
       return false;
     } finally {
       setBulkSaving(false);
@@ -547,6 +1056,8 @@ export default function BillingOrderClient({
   const handleMarkAllOk = async () => {
     const updates = buildMarkAllOkUpdates(billingItems);
     if (updates.length === 0) return;
+
+    vibrateOnTap();
 
     const previous = snapshotPostControls(billingItems);
     const saved = await applyBulkPostControl(
@@ -580,11 +1091,13 @@ export default function BillingOrderClient({
   const finalActionDisabled =
     submitting ||
     savingComment ||
+    retryingComment ||
+    retryingPostControls ||
     isNavigating ||
     pendingControlCount > 0 ||
     hasPendingPostControlWrites;
 
-  const handleCopyStructuredData = () => {
+  const handleCopyStructuredData = async () => {
     if (!order) return;
 
     let text = `--- DATOS ESTRUCTURADOS PARA FACTURACIÓN ---\n`;
@@ -608,9 +1121,25 @@ export default function BillingOrderClient({
     text += `Descuentos Totales: -$${order.totalDiscount.toFixed(2)}\n`;
     text += `TOTAL FINAL: $${order.finalTotal.toFixed(2)}\n`;
 
-    navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await copyTextToClipboard(text);
+      if (copyResetTimerRef.current !== null) {
+        window.clearTimeout(copyResetTimerRef.current);
+      }
+      setCopied(true);
+      showToast('Datos estructurados copiados al portapapeles.', 'success');
+      copyResetTimerRef.current = window.setTimeout(() => {
+        copyResetTimerRef.current = null;
+        setCopied(false);
+      }, 2000);
+    } catch {
+      if (copyResetTimerRef.current !== null) {
+        window.clearTimeout(copyResetTimerRef.current);
+        copyResetTimerRef.current = null;
+      }
+      setCopied(false);
+      showToast('No se pudieron copiar los datos. Intentá de nuevo.', 'error');
+    }
   };
 
   if (loading) {
@@ -693,24 +1222,82 @@ export default function BillingOrderClient({
           <div className="flex w-full flex-col items-start gap-3 md:w-auto md:items-end">
             <StatusBadge variant="billing" status={order.status} />
             <div className="flex flex-wrap items-center gap-2">
+              <KeepAwakeToggle />
               <OrderShareButtons order={order} hideLabelOnMobile />
               <OrderPrintLink href={`/billing/orders/${id}/print`} hideLabelOnMobile />
               <Button
                 variant="secondary"
                 size="sm"
-                onClick={handleCopyStructuredData}
-                aria-label="Copiar Datos"
+                onClick={() => void handleCopyStructuredData()}
+                aria-label={copied ? 'Datos copiados' : 'Copiar Datos'}
+                data-testid="billing-copy-data"
               >
                 {copied ? (
                   <Check className="h-4 w-4 text-status-delivered" aria-hidden="true" />
                 ) : (
                   <Copy className="h-4 w-4" aria-hidden="true" />
                 )}
-                <span className="hidden sm:inline">{copied ? '¡Copiado!' : 'Copiar Datos'}</span>
+                <span className="sr-only sm:not-sr-only" aria-live="polite">
+                  {copied ? '¡Copiado!' : 'Copiar Datos'}
+                </span>
               </Button>
             </div>
           </div>
         </Card>
+
+        {pendingPostControlCount > 0 && (
+          <div
+            data-testid="billing-pending-post-control"
+            className="flex items-center justify-between gap-3 rounded-lg border border-status-draft-border bg-status-draft-soft px-3 py-2"
+          >
+            <div className="min-w-0">
+              <p className="text-xs font-semibold text-status-draft">
+                Control post-factura pendiente de sincronizar
+              </p>
+              <p className="mt-0.5 text-[11px] text-status-draft">
+                {pendingPostControlCount === 1
+                  ? '1 línea conserva el control marcado en este dispositivo.'
+                  : `${pendingPostControlCount} líneas conservan el control marcado en este dispositivo.`}
+              </p>
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void retryPendingPostControls({ announceFailure: true })}
+              disabled={retryingPostControls}
+              className="min-h-11 shrink-0 px-3"
+              data-testid="billing-retry-post-control"
+            >
+              {retryingPostControls ? 'Enviando...' : 'Reintentar ahora'}
+            </Button>
+          </div>
+        )}
+
+        {pendingComment && (
+          <div
+            className="flex items-center justify-between gap-3 rounded-lg border border-status-draft-border bg-status-draft-soft px-3 py-2"
+            data-testid="billing-pending-comment"
+          >
+            <div className="min-w-0">
+              <p className="text-xs font-semibold text-status-draft">
+                Comentario pendiente de sincronizar
+              </p>
+              <p className="mt-0.5 text-[11px] text-status-draft">
+                Se enviará al recuperar la conexión o al guardar el estado del pedido.
+              </p>
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void retryPendingComment({ announceFailure: true })}
+              disabled={savingComment || submitting || retryingComment}
+              className="min-h-11 shrink-0 px-3"
+              data-testid="billing-retry-comment"
+            >
+              {retryingComment ? 'Enviando...' : 'Reintentar ahora'}
+            </Button>
+          </div>
+        )}
 
         {/* Comentarios y Observaciones */}
         <CommentsPanel
@@ -806,18 +1393,21 @@ export default function BillingOrderClient({
           </div>
 
           {showLineFilters && (
-            <div className="space-y-2" data-testid="billing-line-filters">
+            <>
               <OrderLineFilters
                 counts={lineFilterCounts}
                 filter={lineFilter}
                 onFilterChange={handleLineFilterChange}
                 query={lineSearch}
                 onQueryChange={handleLineSearchChange}
+                brands={lineBrands}
+                brandFilter={lineBrandFilter}
+                onBrandFilterChange={handleLineBrandFilterChange}
               />
-              <p className="text-[10px] text-muted" role="status">
+              <p className="mt-2 text-[10px] text-muted" role="status">
                 Mostrando {visibleBillingItems.length} de {billingItems.length} líneas
               </p>
-            </div>
+            </>
           )}
 
           {canControlLines && (
@@ -886,38 +1476,48 @@ export default function BillingOrderClient({
             <div className="block sm:hidden space-y-3">
               {visibleBillingItems.map((item) => {
                 const finalQty = lineQuantity(item);
-                const isMissing = item.lineTotal === 0;
+                const isMissing = isMissingLine(item);
                 const pendingDetail = pendingDetailOf(item);
                 return (
                   <div
                     key={`mob-${item._id}`}
                     data-testid="billing-item-card"
-                    className={`p-4 rounded-lg border transition ${
+                    className={`cv-list-item cv-billing-card p-4 rounded-lg border transition ${
+                      pinnedItemKey === item._id ? 'cv-pinned ' : ''
+                    }${
                       isMissing
                         ? 'bg-status-blocked-soft border-status-blocked-border'
                         : 'bg-surface-muted border-border  '
                     }`}
                   >
                     <div className="flex justify-between items-start gap-2 mb-2">
-                      <div>
-                        <span className="font-mono text-xs text-muted">
-                          {item.productCode ?? item.productId?.code}
-                        </span>
-                        <h4 className="font-medium text-sm mt-0.5 text-foreground">
-                          {item.productName ?? item.productId?.name}
-                        </h4>
-                        <span className="text-[10px] text-action-text">
-                          {item.brandName ?? item.productId?.brandId?.name}
-                        </span>
-                        {isMissing ? (
-                          <span className="block mt-1 text-[10px] font-semibold text-status-blocked">
-                            {MISSING_LINE_LABEL}
+                      <div className="flex min-w-0 items-start gap-3">
+                        <ProductThumbnail
+                          src={item.productId?.imageUrl}
+                          alt={item.productName ?? item.productId?.name ?? 'Producto'}
+                          size={44}
+                          className="shrink-0"
+                        />
+                        <div className="min-w-0">
+                          <span className="font-mono text-xs text-muted">
+                            {item.productCode ?? item.productId?.code}
                           </span>
-                        ) : pendingDetail ? (
-                          <span className="block mt-1 text-[10px] font-semibold text-status-draft">
-                            Motivo pendiente
+                          <h4 className="font-medium text-sm mt-0.5 text-foreground">
+                            {item.productName ?? item.productId?.name}
+                          </h4>
+                          <span className="text-[10px] text-action-text">
+                            {item.brandName ?? item.productId?.brandId?.name}
                           </span>
-                        ) : null}
+                          {isMissing ? (
+                            <span className="block mt-1 text-[10px] font-semibold text-status-blocked">
+                              {MISSING_LINE_LABEL}
+                            </span>
+                          ) : pendingDetail ? (
+                            <span className="block mt-1 text-[10px] font-semibold text-status-draft">
+                              Motivo pendiente
+                            </span>
+                          ) : null}
+                        </div>
                       </div>
                       <span
                         className={`font-bold text-sm ${isMissing ? 'text-status-blocked' : 'text-status-delivered'}`}
@@ -969,7 +1569,13 @@ export default function BillingOrderClient({
                       </span>
                       <PostControlSelector
                         value={item.postControl}
-                        disabled={!canControlLines || bulkSaving || savingComment}
+                        disabled={
+                          !canControlLines ||
+                          bulkSaving ||
+                          savingComment ||
+                          retryingComment ||
+                          retryingPostControls
+                        }
                         saving={savingPostControlIds.has(item._id)}
                         onChange={(next) => handleSetPostControl(item._id, next)}
                       />
@@ -998,12 +1604,14 @@ export default function BillingOrderClient({
                   <TableBody>
                     {visibleBillingItems.map((item) => {
                       const finalQty = lineQuantity(item);
-                      const isMissing = item.lineTotal === 0;
+                      const isMissing = isMissingLine(item);
                       const pendingDetail = pendingDetailOf(item);
                       return (
                         <TableRow
                           key={item._id}
-                          className={`transition ${
+                          className={`cv-list-item cv-table-row transition ${
+                            pinnedItemKey === item._id ? 'cv-pinned ' : ''
+                          }${
                             isMissing
                               ? 'bg-status-blocked-soft hover:brightness-95'
                               : 'hover:bg-surface-muted'
@@ -1013,10 +1621,20 @@ export default function BillingOrderClient({
                             {item.productCode ?? item.productId?.code}
                           </TableCell>
                           <TableCell className="font-medium text-foreground">
-                            {item.productName ?? item.productId?.name}
-                            <span className="block text-[10px] text-action-text">
-                              {item.brandName ?? item.productId?.brandId?.name}
-                            </span>
+                            <div className="flex items-center gap-3">
+                              <ProductThumbnail
+                                src={item.productId?.imageUrl}
+                                alt={item.productName ?? item.productId?.name ?? 'Producto'}
+                                size={40}
+                                className="shrink-0"
+                              />
+                              <div className="min-w-0">
+                                {item.productName ?? item.productId?.name}
+                                <span className="block text-[10px] text-action-text">
+                                  {item.brandName ?? item.productId?.brandId?.name}
+                                </span>
+                              </div>
+                            </div>
                           </TableCell>
                           <TableCell
                             align="center"
@@ -1064,7 +1682,13 @@ export default function BillingOrderClient({
                           <TableCell>
                             <PostControlSelector
                               value={item.postControl}
-                              disabled={!canControlLines || bulkSaving || savingComment}
+                              disabled={
+                                !canControlLines ||
+                                bulkSaving ||
+                                savingComment ||
+                                retryingComment ||
+                                retryingPostControls
+                              }
                               saving={savingPostControlIds.has(item._id)}
                               onChange={(next) => handleSetPostControl(item._id, next)}
                             />
@@ -1133,7 +1757,12 @@ export default function BillingOrderClient({
                   size="lg"
                   onClick={() => handleUpdateStatus('control_post_factura')}
                   disabled={
-                    submitting || savingComment || isNavigating || hasPendingPostControlWrites
+                    submitting ||
+                    savingComment ||
+                    retryingComment ||
+                    retryingPostControls ||
+                    isNavigating ||
+                    hasPendingPostControlWrites
                   }
                   className="px-6 py-3"
                 >
@@ -1149,6 +1778,8 @@ export default function BillingOrderClient({
                   disabled={
                     submitting ||
                     savingComment ||
+                    retryingComment ||
+                    retryingPostControls ||
                     isNavigating ||
                     hasPendingPostControlWrites ||
                     pendingControlCount > 0
@@ -1206,7 +1837,12 @@ export default function BillingOrderClient({
                 size="sm"
                 onClick={() => handleUpdateStatus('control_post_factura')}
                 disabled={
-                  submitting || savingComment || isNavigating || hasPendingPostControlWrites
+                  submitting ||
+                  savingComment ||
+                  retryingComment ||
+                  retryingPostControls ||
+                  isNavigating ||
+                  hasPendingPostControlWrites
                 }
                 className="min-w-0 flex-1 px-3 py-2.5 text-[11px] font-semibold"
                 data-testid="billing-mark-invoiced"

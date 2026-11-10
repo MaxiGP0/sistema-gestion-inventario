@@ -1,8 +1,8 @@
 'use client';
 
-import { useId, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { KeyRound, Power, PowerOff, Trash2, UserPlus, Users } from 'lucide-react';
+import { ChevronUp, KeyRound, Power, PowerOff, Trash2, UserPlus, Users } from 'lucide-react';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import Button from '@/components/ui/Button';
 import Card from '@/components/ui/Card';
@@ -56,6 +56,7 @@ export default function UsersManager({ initialUsers, currentUserId }: UsersManag
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState<UserRole>('vendedor');
+  const [mobileFormOpen, setMobileFormOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<UserDTO | null>(null);
   const [resetUser, setResetUser] = useState<UserDTO | null>(null);
@@ -63,6 +64,9 @@ export default function UsersManager({ initialUsers, currentUserId }: UsersManag
   const [resetLoading, setResetLoading] = useState(false);
   const resetTitleId = useId();
   const resetDescriptionId = useId();
+  const formPanelId = useId();
+  const formCardRef = useRef<HTMLDivElement>(null);
+  const usernameInputRef = useRef<HTMLInputElement>(null);
   const { showToast } = useToast();
   const router = useRouter();
 
@@ -70,6 +74,15 @@ export default function UsersManager({ initialUsers, currentUserId }: UsersManag
     setUsername('');
     setPassword('');
     setRole('vendedor');
+    setMobileFormOpen(false);
+  };
+
+  const openMobileForm = () => {
+    setMobileFormOpen(true);
+    requestAnimationFrame(() => {
+      formCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      usernameInputRef.current?.focus({ preventScroll: true });
+    });
   };
 
   const handleCreate = async (event: React.FormEvent) => {
@@ -166,78 +179,122 @@ export default function UsersManager({ initialUsers, currentUserId }: UsersManag
   return (
     <>
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3 lg:gap-8">
-        <Card className="h-fit">
-          <div className="mb-6 flex items-center gap-3">
-            <div className="rounded-md bg-action-soft p-3 text-action-text">
-              <UserPlus className="h-6 w-6" aria-hidden="true" />
+        {!mobileFormOpen && (
+          <Card
+            padding="none"
+            className="flex items-center justify-between gap-3 px-3 py-1 lg:hidden"
+            data-testid="user-mobile-form-toggle"
+          >
+            <div className="flex min-w-0 items-center gap-2">
+              <div className="rounded-md bg-action-soft p-2 text-action-text">
+                <UserPlus className="h-5 w-5" aria-hidden="true" />
+              </div>
+              <h2 className="truncate text-sm font-semibold text-foreground">Nuevo Usuario</h2>
             </div>
-            <div>
-              <h2 className="text-base font-semibold text-foreground">Nuevo Usuario</h2>
-              <p className="text-xs text-muted">Alta con contraseña inicial</p>
-            </div>
-          </div>
-
-          <form onSubmit={handleCreate} className="space-y-4">
-            <div>
-              <label className="block text-xs font-medium uppercase mb-1 text-foreground">
-                Usuario
-              </label>
-              <input
-                type="text"
-                value={username}
-                onChange={(event) => setUsername(event.target.value)}
-                required
-                maxLength={60}
-                autoComplete="off"
-                placeholder="Ej: juan.perez"
-                className={inputClassName}
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium uppercase mb-1 text-foreground">
-                Contraseña inicial
-              </label>
-              <input
-                type="password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                required
-                minLength={6}
-                autoComplete="new-password"
-                placeholder="Mínimo 6 caracteres"
-                className={inputClassName}
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium uppercase mb-1 text-foreground">
-                Rol
-              </label>
-              <select
-                value={role}
-                onChange={(event) => setRole(event.target.value as UserRole)}
-                className={inputClassName}
-              >
-                {USER_ROLES.map((roleOption) => (
-                  <option key={roleOption} value={roleOption}>
-                    {USER_ROLE_LABELS[roleOption]}
-                  </option>
-                ))}
-              </select>
-            </div>
-
             <Button
-              type="submit"
+              type="button"
               variant="primary"
-              fullWidth
-              disabled={loading}
-              className="py-2.5 text-sm"
+              size="sm"
+              onClick={openMobileForm}
+              aria-expanded={false}
+              aria-controls={formPanelId}
+              className="min-h-11 shrink-0"
             >
-              {loading ? 'Creando...' : 'Crear Usuario'}
+              + Nuevo Usuario
             </Button>
-          </form>
-        </Card>
+          </Card>
+        )}
+
+        <div
+          id={formPanelId}
+          ref={formCardRef}
+          className={`scroll-mt-24 ${mobileFormOpen ? 'block' : 'hidden'} lg:block`}
+        >
+          <Card className="h-fit">
+            <div className="mb-6 flex items-center gap-3">
+              <div className="rounded-md bg-action-soft p-3 text-action-text">
+                <UserPlus className="h-6 w-6" aria-hidden="true" />
+              </div>
+              <div className="min-w-0">
+                <h2 className="text-base font-semibold text-foreground">Nuevo Usuario</h2>
+                <p className="text-xs text-muted">Alta con contraseña inicial</p>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => setMobileFormOpen(false)}
+                title="Ocultar formulario"
+                aria-label="Ocultar formulario"
+                className="ml-auto shrink-0 lg:hidden"
+              >
+                <ChevronUp className="h-4 w-4" aria-hidden="true" />
+              </Button>
+            </div>
+
+            <form onSubmit={handleCreate} className="space-y-4">
+              <div>
+                <label className="block text-xs font-medium uppercase mb-1 text-foreground">
+                  Usuario
+                </label>
+                <input
+                  ref={usernameInputRef}
+                  type="text"
+                  value={username}
+                  onChange={(event) => setUsername(event.target.value)}
+                  required
+                  maxLength={60}
+                  autoComplete="off"
+                  placeholder="Ej: juan.perez"
+                  className={inputClassName}
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium uppercase mb-1 text-foreground">
+                  Contraseña inicial
+                </label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  required
+                  minLength={6}
+                  autoComplete="new-password"
+                  placeholder="Mínimo 6 caracteres"
+                  className={inputClassName}
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium uppercase mb-1 text-foreground">
+                  Rol
+                </label>
+                <select
+                  value={role}
+                  onChange={(event) => setRole(event.target.value as UserRole)}
+                  className={inputClassName}
+                >
+                  {USER_ROLES.map((roleOption) => (
+                    <option key={roleOption} value={roleOption}>
+                      {USER_ROLE_LABELS[roleOption]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <Button
+                type="submit"
+                variant="primary"
+                fullWidth
+                disabled={loading}
+                className="py-2.5 text-sm"
+              >
+                {loading ? 'Creando...' : 'Crear Usuario'}
+              </Button>
+            </form>
+          </Card>
+        </div>
 
         <Card className="lg:col-span-2 ">
           <div className="flex items-center justify-between mb-6 gap-4">

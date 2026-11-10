@@ -54,7 +54,7 @@ Para garantizar rendimiento, mantenibilidad, soporte PWA offline/online y carga 
 
 #### 3.3. Colección `brands` (Marcas)
 * `_id` (ObjectId)
-* `name` (String, único: ej: Capitalis, Genomma, Algabó, Bagó)
+* `name` (String, único: ej: NovaFarma, BioSalud, DermaPlus, VitaLab)
 * `code_prefix` (String o Null: prefijo característico del código, ej: "C", "B")
 
 #### 3.4. Colección `products` (Productos)

@@ -1,7 +1,7 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
+import { Brand } from './Brand';
 import { buildProductSearchFields } from '../lib/search-normalize';
 import { registerSearchFieldHooks } from '../lib/search-schema';
-import './Brand';
 
 export interface IProduct extends Document {
   brandId: mongoose.Types.ObjectId;
@@ -15,7 +15,7 @@ export interface IProduct extends Document {
   /** Claves normalizadas (minúsculas, sin acentos) para búsqueda por prefijo. */
   searchName: string;
   searchCode: string;
-  /** Palabras únicas normalizadas de code y name (índice multikey). */
+  /** Palabras únicas normalizadas de code, name y brandName (índice multikey). */
   searchTokens: string[];
   createdAt: Date;
   updatedAt: Date;
@@ -46,10 +46,36 @@ const ProductSchema = new Schema<IProduct>(
   { timestamps: true },
 );
 
+/**
+ * `save()` y `create()` no siempre tienen la marca poblada. Antes de calcular
+ * las claves se resuelve su nombre para que `searchTokens` lo incluya también
+ * en altas hechas desde scripts o desde el modelo.
+ */
+ProductSchema.pre('validate', async function (this: Record<string, any>) {
+  const brandId = this.brandId;
+  if (!brandId) return;
+  if (typeof brandId === 'object' && 'name' in brandId) return;
+  if (mongoose.connection.readyState !== 1) return;
+
+  const brand = await Brand.findById(brandId).select('name').lean();
+  if (brand?.name) this.$locals.brandName = brand.name;
+});
+
+function computeProductSearchFields(document: Record<string, any>) {
+  // Se leen los campos uno por uno: esparcir un documento de Mongoose no
+  // expone los getters del schema (`code`, `name`, `brandId`).
+  return buildProductSearchFields({
+    code: document.code,
+    name: document.name,
+    brandId: document.brandId,
+    brandName: document.$locals?.brandName,
+  });
+}
+
 registerSearchFieldHooks(
   ProductSchema,
   { code: ['searchCode'], name: ['searchName'] },
-  buildProductSearchFields,
+  computeProductSearchFields,
 );
 
 // Compound unique index for brandId and product code.
@@ -71,6 +97,9 @@ ProductSchema.index({ searchCode: 1, active: 1 });
 // Multikey: cada palabra de code/name es una entrada del índice. Las consultas
 // multi-token (`$all` de prefijos anclados) se resuelven sin recorrer el catálogo.
 ProductSchema.index({ searchTokens: 1, active: 1 });
+// Snapshot incremental del catálogo offline: orden estable y cursor por
+// `updatedAt` + `_id` sin SORT en memoria.
+ProductSchema.index({ updatedAt: 1, _id: 1 });
 
 export const Product: Model<IProduct> =
   mongoose.models.Product || mongoose.model<IProduct>('Product', ProductSchema);

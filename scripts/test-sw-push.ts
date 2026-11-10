@@ -17,7 +17,7 @@ import vm from 'node:vm';
 
 const swSource = readFileSync(new URL('../public/sw.js', import.meta.url), 'utf8');
 const ORDER_ID = '64b7f1c2e4b0a1d2f3a4b5c6';
-const ORIGIN = 'https://inventario.test';
+const ORIGIN = 'https://sgi.test';
 
 interface Harness {
   dispatch: (type: string, event: Record<string, unknown>) => Promise<void>;

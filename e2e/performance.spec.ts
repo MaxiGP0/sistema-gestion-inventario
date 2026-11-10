@@ -292,7 +292,7 @@ const routes: RouteDefinition[] = [
     ready: (page) =>
       expect(page.getByRole('heading', { name: 'Pedidos Pendientes de Picking' })).toBeVisible(),
     interact: async (page) => {
-      const search = page.getByPlaceholder(/Buscar por nombre de cliente/);
+      const search = page.getByPlaceholder(/Buscar por cliente, producto/);
       await search.click();
       await page.keyboard.type('E2E');
     },

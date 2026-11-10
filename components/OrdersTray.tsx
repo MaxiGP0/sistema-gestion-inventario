@@ -47,6 +47,8 @@ interface OrdersTrayProps {
   initialDatePreset?: OrdersTrayDatePreset;
   /** Vista de archivados resuelta desde `?archived=1` en el servidor. */
   initialShowArchived?: boolean;
+  /** Término de búsqueda resuelto desde `?search=...` en el servidor. */
+  initialSearch?: string;
   /** Primera página ya resuelta por el Server Component. */
   initialOrders?: OrderSummaryDTO[];
   initialTotal?: number | null;
@@ -68,6 +70,7 @@ export default function OrdersTray({
   initialStatus = 'all',
   initialDatePreset = 'all',
   initialShowArchived = false,
+  initialSearch = '',
   initialOrders,
   initialTotal = null,
   initialNextCursor = null,
@@ -85,7 +88,7 @@ export default function OrdersTray({
         filters: {
           status: getOrdersTrayStatusParam(config, initialStatus),
           archived: initialShowArchived,
-          search: '',
+          search: initialSearch,
           startDate: initialDateRange.startDate,
           endDate: initialDateRange.endDate,
         },
@@ -129,6 +132,7 @@ export default function OrdersTray({
     status: initialStatus,
     datePreset: initialDatePreset,
     showArchived: initialShowArchived,
+    search: initialSearch,
   });
 
   const pathname = usePathname();
@@ -137,6 +141,20 @@ export default function OrdersTray({
   const [dateFiltersOpen, setDateFiltersOpen] = useState(false);
   const activeDateLabel =
     ORDERS_TRAY_DATE_FILTERS.find((filter) => filter.value === datePreset)?.label ?? 'Todas';
+  const trayChipVisible = pendingNotificationCount > 0;
+
+  // El chip comparte el borde inferior con el indicador offline y el aviso del
+  // service worker. El atributo permite al CSS calcular la capa de cada aviso.
+  useEffect(() => {
+    if (!trayChipVisible) return;
+
+    const root = document.documentElement;
+    root.dataset.trayChipVisible = 'true';
+
+    return () => {
+      delete root.dataset.trayChipVisible;
+    };
+  }, [trayChipVisible]);
 
   // Al volver de un detalle donde se guardó un cambio, el Router Cache puede
   // traer la bandeja anterior. Se pinta esa data y se refresca en segundo plano.
@@ -419,8 +437,8 @@ export default function OrdersTray({
       )}
 
       {/* Movimientos SSE que llegaron mientras el usuario escribía o confirmaba. */}
-      {pendingNotificationCount > 0 && (
-        <div className="pointer-events-none fixed inset-x-0 bottom-[calc(4.5rem+env(safe-area-inset-bottom))] z-40 flex justify-center px-4 sm:bottom-6">
+      {trayChipVisible && (
+        <div className="pointer-events-none fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+var(--mobile-tray-chip-clearance))] z-40 flex justify-center px-4 sm:bottom-6">
           <button
             type="button"
             onClick={applyNotificationRefresh}

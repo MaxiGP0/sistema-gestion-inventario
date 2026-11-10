@@ -6,7 +6,7 @@
  * Ejecutar con: npm test
  */
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 
 import {
   LOGIN_RATE_LIMIT,
@@ -22,6 +22,17 @@ import {
 import { POST as login } from '../app/api/auth/login/route';
 
 const { maxAttempts, windowMs } = LOGIN_RATE_LIMIT;
+
+// Estos casos simulan un proxy confiable que reescribe x-forwarded-for. El
+// comportamiento por defecto (TRUST_PROXY_HEADERS=false) se prueba en
+// scripts/test-api-hardening.ts.
+const previousTrustProxyHeaders = process.env.TRUST_PROXY_HEADERS;
+process.env.TRUST_PROXY_HEADERS = 'true';
+
+after(() => {
+  if (previousTrustProxyHeaders === undefined) delete process.env.TRUST_PROXY_HEADERS;
+  else process.env.TRUST_PROXY_HEADERS = previousTrustProxyHeaders;
+});
 
 function loginRequest(body: string, headers: Record<string, string> = {}) {
   return new Request('http://localhost/api/auth/login', {

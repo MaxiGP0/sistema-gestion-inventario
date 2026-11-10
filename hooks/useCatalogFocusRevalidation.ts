@@ -4,9 +4,9 @@ import { useEffect, useRef } from 'react';
 import { subscribeCatalogFocus } from '@/lib/catalog-query-cache';
 
 /**
- * Ejecuta `onRevalidate` cuando la pestaña vuelve a foco/visibilidad. La caché
- * de catálogo ya se invalida antes de avisar, así que el callback puede volver
- * a pedir los mismos datos y recibir valores frescos.
+ * Ejecuta `onRevalidate` cuando la pestaña vuelve a foco/visibilidad y la
+ * caché de catálogo quedó vieja (ausencia >30 s o TTL vencido). Si la vista
+ * sigue mostrando datos frescos, la caché no avisa y no se disparan búsquedas.
  *
  * El callback se guarda en un ref para no reinstalar el listener en cada
  * render (y para que el evento use siempre la versión más reciente).

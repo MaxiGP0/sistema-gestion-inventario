@@ -32,7 +32,30 @@ export interface CurrentSessionSnapshot {
 
 type CurrentSessionSeed = Omit<CurrentSessionSnapshot, 'expiresAt'>;
 
-const cache = new Map<string, CurrentSessionSnapshot>();
+interface CurrentSessionCacheState {
+  entries: Map<string, CurrentSessionSnapshot>;
+}
+
+declare global {
+  var sgiCurrentSessionCache: CurrentSessionCacheState | undefined;
+}
+
+/**
+ * El Map vive en `globalThis` por la misma razón que el bus SSE: en Next cada
+ * route handler es un entrypoint independiente y puede quedarse con su propia
+ * copia de este módulo. Si cada copia tuviera su propio Map, la invalidación
+ * de `/api/users` no llegaría al heartbeat de `/api/events` y la revocación
+ * quedaría sólo a merced del TTL. El singleton de proceso mantiene una única
+ * fuente para todas las rutas.
+ */
+const state: CurrentSessionCacheState = global.sgiCurrentSessionCache ?? {
+  entries: new Map<string, CurrentSessionSnapshot>(),
+};
+if (!global.sgiCurrentSessionCache) {
+  global.sgiCurrentSessionCache = state;
+}
+
+const cache = state.entries;
 
 /** TTL efectivo; `AUTH_SESSION_CACHE_TTL_SECONDS` se limita a 30-60 s. */
 export function getCurrentSessionCacheTtlMs(): number {

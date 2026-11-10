@@ -133,13 +133,14 @@ async function main() {
   for (let index = 0; index < TOTAL; index += 1) {
     const name = index % 500 === 0 ? `Gómez Producto ${index}` : `Producto ${index}`;
     const code = index % 1000 === 0 ? `MOD-${index}` : `P-${index}`;
+    const brand = brandDocs[index % brandDocs.length];
     productDocs.push({
-      brandId: brandDocs[index % brandDocs.length]._id,
+      brandId: brand._id,
       code,
       name,
       active: index % 97 !== 0,
       price: index,
-      ...buildProductSearchFields({ code, name }),
+      ...buildProductSearchFields({ code, name, brandName: brand.name }),
     });
   }
   await products.insertMany(productDocs);
@@ -158,7 +159,7 @@ async function main() {
             {
               productId: new mongoose.Types.ObjectId(),
               productCode: 'SH-400',
-              productName: 'Shampoo Capitalis 400ml',
+              productName: 'Shampoo NovaFarma 400ml',
               brandName: 'Gómez Labs',
             },
           ]
@@ -240,11 +241,12 @@ async function main() {
   // Reemplaza el índice de texto: prefijo multikey + orden del cursor.
   await orders.createIndex({ archived: 1, searchTokens: 1, createdAt: -1, _id: -1 });
 
-  const newBrandIds = (
-    await brands.find(buildBrandSearchFilter('Gómez')!).project({ _id: 1 }).toArray()
-  ).map((brand) => brand._id);
+  const newBrands = await brands
+    .find(buildBrandSearchFilter('Gómez')!)
+    .project({ _id: 1, name: 1 })
+    .toArray();
   const newClientFilter = buildClientSearchFilter('Gómez')!;
-  const newProductFilter = buildProductSearchFilter('Gómez', newBrandIds)!;
+  const newProductFilter = buildProductSearchFilter('Gómez', newBrands)!;
   const newOrderQuery = buildOrderListQuery(
     { userId: '0000000000000000000000a1', username: 'admin', role: 'admin' },
     { archived: 'false', search: 'Gómez' },

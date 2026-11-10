@@ -10,6 +10,7 @@
 
 import { Readable } from 'node:stream';
 import ExcelJS from 'exceljs';
+import { normalizeImageUrlInput } from './validations';
 import type { CatalogImportUpdateMode } from './types/catalog';
 
 /** Límites defensivos del import: tamaño de archivo y filas a procesar. */
@@ -186,7 +187,7 @@ export function normalizeRow(values: Record<string, unknown>): Record<string, un
 
 /**
  * Clave canónica de una marca: trim, mayúsculas, sin acentos y con espacios
- * colapsados. " Bagó " y "BAGO" resuelven a la misma marca existente.
+ * colapsados. " DermaPlus " y "DERMAPLUS" resuelven a la misma marca existente.
  */
 export function normalizeBrandName(value: unknown): string {
   const trimmed = String(value ?? '').trim();
@@ -315,6 +316,20 @@ export function buildProductImportPlan(
       });
     }
 
+    // La imagen se valida con el mismo esquema que el alta/edición. Una URL
+    // insegura descarta la fila completa y se informa como error de fila; no
+    // aborta el resto de la importación.
+    const rawImageUrl = asText(firstValue(normalized, ['imagen', 'image', 'image_url']));
+    const imageUrl = normalizeImageUrlInput(rawImageUrl);
+    if (imageUrl === null) {
+      rowIssues.push({
+        row,
+        field: 'imagen',
+        kind: 'validation',
+        reason: 'La URL de imagen debe ser una ruta local o una URL HTTPS válida',
+      });
+    }
+
     let price = 0;
     let priceWithIva = 0;
 
@@ -405,7 +420,7 @@ export function buildProductImportPlan(
       name,
       price,
       priceWithIva,
-      imageUrl: asText(firstValue(normalized, ['imagen', 'image', 'image_url'])),
+      imageUrl: imageUrl ?? '',
       exists,
     });
   }

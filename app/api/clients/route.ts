@@ -1,41 +1,33 @@
 import { NextResponse } from 'next/server';
 import dbConnect from '@/lib/mongodb';
-import { forbiddenResponse, requireCurrentSession, requireSession } from '@/lib/auth';
+import { forbiddenResponse, requireCurrentSession } from '@/lib/auth';
 import { canCreateClient } from '@/lib/authz';
 import { buildClientSearchFilter } from '@/lib/search-query';
 import { Client } from '@/models/Client';
-import { clientSchema } from '@/lib/validations';
-import { handleRouteError, parseJsonBody } from '@/lib/api-errors';
+import { clientListQuerySchema, clientSchema } from '@/lib/validations';
+import { handleRouteError, parseJsonBody, parseQueryParams } from '@/lib/api-errors';
 import { revalidateCatalog } from '@/lib/catalog-cache';
 import { catalogCacheHeaders } from '@/lib/catalog-http-cache';
 import type { ClientDTO, ClientListResponse, ClientMutationResponse } from '@/lib/types';
 import { withRouteLogging } from '@/lib/logger';
 
-const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 200;
 // El listado y el autocompletado sólo usan estos campos; createdAt/updatedAt
 // viajaban en cada documento sin que ningún consumidor los leyera.
 const CLIENT_LIST_FIELDS = 'code name address localidad province generalDiscount brandDiscounts';
 
 export const GET = withRouteLogging(async (request: Request) => {
   try {
-    const auth = requireSession(request);
+    const auth = await requireCurrentSession(request);
     if ('response' in auth) return auth.response;
 
-    await dbConnect();
-    const { searchParams } = new URL(request.url);
-    const search = searchParams.get('search') || searchParams.get('q') || '';
-    // Paginación robusta: valores no numéricos caen a los defaults y el límite
-    // se acota para no devolver la colección entera sin querer (antes limit=0
-    // significaba "todo" y no se validaba page).
-    const parsedPage = parseInt(searchParams.get('page') || '1', 10);
-    const page = Number.isFinite(parsedPage) ? Math.max(1, parsedPage) : 1;
-    const parsedLimit = parseInt(searchParams.get('limit') || String(DEFAULT_LIMIT), 10);
-    const limit = Math.min(
-      MAX_LIMIT,
-      Math.max(1, Number.isFinite(parsedLimit) ? parsedLimit : DEFAULT_LIMIT),
-    );
+    const parsedQuery = parseQueryParams(request, clientListQuerySchema);
+    if (!parsedQuery.success) return parsedQuery.response;
+
+    const { search: searchParam, q, page, limit } = parsedQuery.data;
+    const search = searchParam ?? q ?? '';
     const skip = (page - 1) * limit;
+
+    await dbConnect();
 
     // Búsqueda por prefijo indexada sobre las claves normalizadas. El fallback
     // para documentos históricos sin `search*` viaja en la misma consulta bajo

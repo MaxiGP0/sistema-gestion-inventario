@@ -6,6 +6,7 @@ import { BookOpen, ChevronLeft, ChevronRight, Search, ShoppingCart, X } from 'lu
 import AppShell from '@/components/app-shell/AppShell';
 import ProductThumbnail from '@/components/ProductThumbnail';
 import OfflineCatalogBadge from '@/components/orders/new/OfflineCatalogBadge';
+import OfflineCatalogSyncProgress from '@/components/orders/new/OfflineCatalogSyncProgress';
 import Button from '@/components/ui/Button';
 import Card from '@/components/ui/Card';
 import FilterChips from '@/components/ui/FilterChips';
@@ -21,8 +22,11 @@ import {
   TableRow,
 } from '@/components/ui/Table';
 import { useUser } from '@/context/UserContext';
+import { useCatalogFocusRevalidation } from '@/hooks/useCatalogFocusRevalidation';
+import { useUrlSearchSync } from '@/hooks/useUrlSearchSync';
 import type { UserRole } from '@/lib/authz';
 import { PRODUCTS_PAGE_SIZE } from '@/lib/catalog-pagination';
+import { vibrateOnTap } from '@/lib/haptics';
 import { countSelectedItems, type QuantityMap } from '@/lib/order-catalog';
 import {
   adjustOrderDraftProduct,
@@ -33,10 +37,9 @@ import {
 import { searchOfflineCatalogProducts } from '@/lib/offline-catalog';
 import {
   isBrowserOffline,
-  prefetchOfflineCatalogClients,
-  prefetchOfflineCatalogProducts,
   rememberOfflineCatalogBrands,
   rememberOfflineCatalogProducts,
+  syncOfflineCatalog,
 } from '@/lib/offline-catalog-sync';
 import type { BrandDTO, ProductDTO } from '@/lib/types';
 import CatalogTabs from './CatalogTabs';
@@ -93,13 +96,18 @@ function DraftProductControls({
   quantity: number;
   onDelta: (productId: string, delta: number) => void;
 }) {
+  const applyDelta = (delta: number) => {
+    vibrateOnTap();
+    onDelta(product._id, delta);
+  };
+
   if (quantity <= 0) {
     return (
       <Button
         type="button"
         variant="secondary"
         size="sm"
-        onClick={() => onDelta(product._id, 1)}
+        onClick={() => applyDelta(1)}
         aria-label={`+ Pedido: ${product.name}`}
         className="shrink-0 rounded-full font-semibold"
       >
@@ -124,7 +132,7 @@ function DraftProductControls({
         type="button"
         variant="secondary"
         size="sm"
-        onClick={() => onDelta(product._id, 6)}
+        onClick={() => applyDelta(6)}
         aria-label={`Sumar 6 unidades de ${product.name}`}
         className="px-2 font-semibold"
       >
@@ -134,7 +142,7 @@ function DraftProductControls({
         type="button"
         variant="secondary"
         size="sm"
-        onClick={() => onDelta(product._id, 12)}
+        onClick={() => applyDelta(12)}
         aria-label={`Sumar 12 unidades de ${product.name}`}
         className="px-2 font-semibold"
       >
@@ -199,6 +207,18 @@ export default function CatalogBrowser({
   const totalPages = offlinePage ? offlinePage.totalPages : serverTotalPages;
   const busy = isPending || offlineLoading;
 
+  /** Delta liviano del snapshot offline al reconectar o volver a foco. */
+  const requestAutoCatalogSync = useCallback(() => {
+    if (!userId || isOffline || isBrowserOffline()) return;
+
+    void syncOfflineCatalog(userId, { auto: true }).catch((error) => {
+      if (error instanceof Error && error.name === 'AbortError') return;
+      console.warn('No se pudo sincronizar el catálogo offline:', error);
+    });
+  }, [isOffline, userId]);
+
+  useCatalogFocusRevalidation(requestAutoCatalogSync);
+
   /** Resuelve una página contra el snapshot local, sin tocar la red. */
   const loadLocalPage = useCallback(
     async (targetPage: number, term: string, targetBrandId: string) => {
@@ -246,11 +266,13 @@ export default function CatalogBrowser({
     [userId],
   );
 
-  // Mantiene los filtros alineados con la URL (atrás/adelante, refresh del server).
-  useEffect(() => {
-    if (isOffline) return;
-    setSearch(initialSearch);
-  }, [initialSearch, isOffline]);
+  // Mantiene el input alineado con la URL (atrás/adelante, refresh del server)
+  // sin borrar los caracteres escritos mientras la navegación está en curso.
+  const markSearchCommitted = useUrlSearchSync({
+    serverValue: initialSearch,
+    setValue: setSearch,
+    enabled: !isOffline,
+  });
 
   useEffect(() => {
     if (isOffline) return;
@@ -308,6 +330,7 @@ export default function CatalogBrowser({
       if (!navigator.onLine) return;
       setIsOffline(false);
       setOfflinePage(null);
+      requestAutoCatalogSync();
       startTransition(() => router.refresh());
     };
 
@@ -320,7 +343,7 @@ export default function CatalogBrowser({
       window.removeEventListener('offline', handleOffline);
       window.removeEventListener('online', handleOnline);
     };
-  }, [brands, router]);
+  }, [brands, requestAutoCatalogSync, router]);
 
   // Búsqueda y filtro locales con debounce cuando no hay red.
   useEffect(() => {
@@ -347,21 +370,23 @@ export default function CatalogBrowser({
   }, [userId, isOffline, initialProducts, brands]);
 
   // La primera página del SSR no alcanza para el modo offline: después de la
-  // pintura se completa el catálogo de productos y clientes en segundo plano.
+  // pintura se completa el catálogo con full sync y, en visitas siguientes,
+  // sólo con deltas.
   useEffect(() => {
     if (!userId || isOffline) return;
 
+    const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      if (isBrowserOffline()) return;
-      void prefetchOfflineCatalogProducts(userId).catch((error) => {
-        console.warn('No se pudo precargar el catálogo de productos offline:', error);
-      });
-      void prefetchOfflineCatalogClients(userId).catch((error) => {
-        console.warn('No se pudo precargar el catálogo de clientes offline:', error);
+      void syncOfflineCatalog(userId, { auto: true, signal: controller.signal }).catch((error) => {
+        if (error instanceof Error && error.name === 'AbortError') return;
+        console.warn('No se pudo sincronizar el catálogo offline:', error);
       });
     }, 2_500);
 
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
   }, [userId, isOffline]);
 
   // El borrador se comparte con /orders/new vía localStorage. Se relee al
@@ -413,6 +438,7 @@ export default function CatalogBrowser({
 
     const timer = setTimeout(
       () => {
+        markSearchCommitted(trimmed);
         startTransition(() => {
           router.replace(buildCatalogUrl(1, trimmed, brandId));
         });
@@ -421,7 +447,7 @@ export default function CatalogBrowser({
     );
 
     return () => clearTimeout(timer);
-  }, [search, initialSearch, brandId, router, isOffline]);
+  }, [search, initialSearch, brandId, router, isOffline, markSearchCommitted]);
 
   const goToPage = (targetPage: number) => {
     if (targetPage < 1 || targetPage > totalPages || targetPage === page) return;
@@ -431,6 +457,7 @@ export default function CatalogBrowser({
       return;
     }
 
+    markSearchCommitted(search);
     startTransition(() => {
       router.push(buildCatalogUrl(targetPage, search.trim(), brandId));
     });
@@ -442,6 +469,7 @@ export default function CatalogBrowser({
     setBrandId(nextBrandId);
     if (isOffline) return;
 
+    markSearchCommitted(search);
     startTransition(() => {
       router.replace(buildCatalogUrl(1, search.trim(), nextBrandId));
     });
@@ -467,6 +495,7 @@ export default function CatalogBrowser({
       bottomClearance={draftBarVisible ? 'extra' : 'default'}
     >
       <CatalogTabs active="products" />
+      <OfflineCatalogSyncProgress className="mb-4" />
       {isOffline && <OfflineCatalogBadge className="mb-4" detail="catálogo de productos" />}
       <Card className="flex flex-col">
         <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
@@ -559,7 +588,7 @@ export default function CatalogBrowser({
                 return (
                   <div
                     key={`mob-${product._id}`}
-                    className="rounded-lg border border-border bg-surface-muted p-3"
+                    className="cv-list-item cv-product-card rounded-lg border border-border bg-surface-muted p-3"
                   >
                     <div className="flex items-start gap-3">
                       <ProductThumbnail

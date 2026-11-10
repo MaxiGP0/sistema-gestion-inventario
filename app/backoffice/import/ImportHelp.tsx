@@ -61,9 +61,9 @@ export default function ImportHelp() {
           entre 0 y 100).
         </li>
         <li>
-          Las marcas se normalizan (sin distinguir mayúsculas ni acentos): “Bagó” y “BAGO” se
-          resuelven como la misma marca. Los códigos repetidos dentro del archivo se informan como
-          duplicados y se omite la segunda fila.
+          Las marcas se normalizan (sin distinguir mayúsculas ni acentos): “DermaPlus” y “DERMAPLUS”
+          se resuelven como la misma marca. Los códigos repetidos dentro del archivo se informan
+          como duplicados y se omite la segunda fila.
         </li>
       </ul>
     </div>

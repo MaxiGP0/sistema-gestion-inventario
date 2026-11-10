@@ -1,7 +1,7 @@
 import { Suspense } from 'react';
 import OrdersTray from '@/components/OrdersTray';
 import OrdersTraySkeleton from '@/components/orders/OrdersTraySkeleton';
-import { requireRolePage } from '@/lib/auth-page';
+import { requireCurrentRolePage } from '@/lib/auth-page';
 import {
   getOrdersTrayStatusParam,
   ORDERS_TRAY_CONFIGS,
@@ -15,6 +15,7 @@ interface MyOrdersPageProps {
     status?: string | string[];
     date?: string | string[];
     archived?: string | string[];
+    search?: string | string[];
   }>;
 }
 
@@ -33,8 +34,8 @@ export default function MyOrdersPage({ searchParams }: MyOrdersPageProps) {
 }
 
 async function MyOrdersContent({ searchParams }: MyOrdersPageProps) {
-  // Misma guarda que el proxy, repetida en la página (defensa en profundidad).
-  const session = await requireRolePage(['admin', 'vendedor']);
+  // Revalida el estado actual: una baja o un cambio de rol se aplica acá.
+  const session = await requireCurrentRolePage(['admin', 'vendedor']);
   const config = ORDERS_TRAY_CONFIGS.vendor;
   const params = await searchParams;
   const filters = resolveOrdersTrayInitialFilters(config, params);
@@ -45,6 +46,7 @@ async function MyOrdersContent({ searchParams }: MyOrdersPageProps) {
     {
       status: getOrdersTrayStatusParam(config, filters.status),
       archived: filters.showArchived ? 'true' : 'false',
+      search: filters.search || null,
       startDate: dateRange.startDate,
       endDate: dateRange.endDate,
     },
@@ -64,6 +66,7 @@ async function MyOrdersContent({ searchParams }: MyOrdersPageProps) {
       initialStatus={filters.status}
       initialDatePreset={filters.datePreset}
       initialShowArchived={filters.showArchived}
+      initialSearch={filters.search}
       initialOrders={page.orders}
       initialTotal={page.pagination.total ?? null}
       initialNextCursor={page.pagination.nextCursor}

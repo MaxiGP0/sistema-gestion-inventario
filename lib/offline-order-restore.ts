@@ -23,10 +23,20 @@ export interface QueueEntryDraftContext {
 export interface RestoreQueueEntryDraftInput extends QueueEntryDraftContext {
   userId: string;
   storage: OrderDraftStorage | null | undefined;
+  /** Pedido a restaurar en modo edición (`sgi_order_draft:${userId}:edit:${orderId}`). */
+  orderId?: string | null;
+  /** Versión vigente del pedido en el servidor (opcional). */
+  version?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Indica si una entrada `update` de la cola corresponde a `mode: 'draft-edit'`. */
+export function isDraftEditQueueEntry(entry: Pick<PendingOrderRequest, 'kind' | 'body'>): boolean {
+  if (entry.kind !== 'update' || !isRecord(entry.body)) return false;
+  return entry.body.mode === 'draft-edit';
 }
 
 function productIdOf(value: unknown): string {
@@ -66,13 +76,16 @@ function fallbackClient(clientId: string, clientName: string | undefined): Order
  * enviar.
  */
 export function buildOrderDraftFromQueueEntry(
-  entry: Pick<PendingOrderRequest, 'kind' | 'body' | 'clientName'>,
+  entry: Pick<PendingOrderRequest, 'kind' | 'body' | 'clientName' | 'orderId'>,
   context: QueueEntryDraftContext,
 ): OrderDraft | null {
-  if (entry.kind !== 'create' || !isRecord(entry.body)) return null;
+  const isCreate = entry.kind === 'create';
+  const isDraftEdit = isDraftEditQueueEntry(entry);
+  if ((!isCreate && !isDraftEdit) || !isRecord(entry.body)) return null;
 
   const clientId = typeof entry.body.clientId === 'string' ? entry.body.clientId.trim() : '';
-  if (!clientId) return null;
+  if (isCreate && !clientId) return null;
+  if (isDraftEdit && !entry.orderId?.trim() && !clientId) return null;
 
   const quantities: OrderDraft['quantities'] = {};
   const itemDiscounts: OrderDraft['itemDiscounts'] = {};
@@ -92,8 +105,17 @@ export function buildOrderDraftFromQueueEntry(
     }
   }
 
-  const knownClient = context.knownClients?.find((client) => client._id === clientId);
-  const selectedClient = knownClient ?? fallbackClient(clientId, entry.clientName);
+  let selectedClient: OrderCatalogClient | null = null;
+  if (clientId) {
+    const knownClient = context.knownClients?.find((client) => client._id === clientId);
+    selectedClient = knownClient ?? fallbackClient(clientId, entry.clientName);
+  } else if (entry.clientName?.trim()) {
+    const trimmedName = entry.clientName.trim();
+    const knownByName = context.knownClients?.find((client) => client.name === trimmedName);
+    selectedClient =
+      knownByName ?? fallbackClient(entry.orderId?.trim() || 'draft-edit', trimmedName);
+  }
+
   const invoiceType = isInvoiceType(entry.body.invoiceType) ? entry.body.invoiceType : '';
   const paymentCondition = isPaymentCondition(entry.body.paymentCondition)
     ? entry.body.paymentCondition
@@ -123,9 +145,18 @@ export function buildOrderDraftFromQueueEntry(
  */
 export function restoreOrderDraftFromQueueEntry(
   input: RestoreQueueEntryDraftInput,
-  entry: Pick<PendingOrderRequest, 'kind' | 'body' | 'clientName'>,
+  entry: Pick<PendingOrderRequest, 'kind' | 'body' | 'clientName' | 'orderId'>,
 ): boolean {
   const draft = buildOrderDraftFromQueueEntry(entry, input);
   if (!draft) return false;
-  return saveOrderDraft(input.storage, draft, input.userId);
+
+  const targetOrderId =
+    input.orderId ?? (isDraftEditQueueEntry(entry) ? entry.orderId?.trim() : undefined);
+
+  return saveOrderDraft(
+    input.storage,
+    draft,
+    input.userId,
+    targetOrderId ? { orderId: targetOrderId, version: input.version } : undefined,
+  );
 }

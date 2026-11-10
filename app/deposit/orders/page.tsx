@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import { Suspense } from 'react';
 import OrdersTray from '@/components/OrdersTray';
 import OrdersTraySkeleton from '@/components/orders/OrdersTraySkeleton';
-import { requireRolePage } from '@/lib/auth-page';
+import { requireCurrentRolePage } from '@/lib/auth-page';
 import {
   getOrdersTrayStatusParam,
   ORDERS_TRAY_CONFIGS,
@@ -20,6 +20,7 @@ interface DepositOrdersPageProps {
     status?: string | string[];
     date?: string | string[];
     archived?: string | string[];
+    search?: string | string[];
   }>;
 }
 
@@ -37,7 +38,7 @@ export default function DepositOrdersPage({ searchParams }: DepositOrdersPagePro
 }
 
 async function DepositOrdersContent({ searchParams }: DepositOrdersPageProps) {
-  const session = await requireRolePage(['admin', 'controlador']);
+  const session = await requireCurrentRolePage(['admin', 'controlador']);
   const config = ORDERS_TRAY_CONFIGS.deposit;
   const params = await searchParams;
   const filters = resolveOrdersTrayInitialFilters(config, params);
@@ -48,6 +49,7 @@ async function DepositOrdersContent({ searchParams }: DepositOrdersPageProps) {
     {
       status: getOrdersTrayStatusParam(config, filters.status),
       archived: filters.showArchived ? 'true' : 'false',
+      search: filters.search || null,
       startDate: dateRange.startDate,
       endDate: dateRange.endDate,
     },
@@ -67,6 +69,7 @@ async function DepositOrdersContent({ searchParams }: DepositOrdersPageProps) {
       initialStatus={filters.status}
       initialDatePreset={filters.datePreset}
       initialShowArchived={filters.showArchived}
+      initialSearch={filters.search}
       initialOrders={page.orders}
       initialTotal={page.pagination.total ?? null}
       initialNextCursor={page.pagination.nextCursor}

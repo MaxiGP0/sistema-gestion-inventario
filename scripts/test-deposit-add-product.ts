@@ -8,8 +8,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  appendDepositCatalogProducts,
   buildDepositAddedItem,
   depositLineTotal,
+  describeDepositCatalogProduct,
   findDepositItemByProductId,
   normalizeDepositAddQuantity,
   planDepositExistingAddition,
@@ -139,4 +141,36 @@ test('normaliza cantidades y encuentra la línea por producto', () => {
 
   assert.equal(findDepositItemByProductId(items, product._id)?.requestedQuantity, 3);
   assert.equal(findDepositItemByProductId(items, 'inexistente'), undefined);
+});
+
+test('el catálogo indica badge y acción "+ Sumar" cuando el producto ya está pedido', () => {
+  const items = [
+    { _id: 'a'.repeat(24), productId: { _id: 'x' }, requestedQuantity: 1 },
+    { productId: { _id: product._id }, requestedQuantity: 4 },
+  ];
+
+  assert.deepEqual(describeDepositCatalogProduct(items, product._id), {
+    inOrder: true,
+    quantity: 4,
+    actionLabel: '+ Sumar',
+    badgeLabel: 'En el pedido: 4 u.',
+  });
+
+  assert.deepEqual(describeDepositCatalogProduct(items, 'inexistente'), {
+    inOrder: false,
+    quantity: 0,
+    actionLabel: 'Agregar',
+  });
+});
+
+test('la página siguiente del catálogo se anexa sin duplicar productos', () => {
+  const first = [{ _id: 'a' }, { _id: 'b' }];
+  const next = [{ _id: 'b' }, { _id: 'c' }];
+
+  assert.deepEqual(appendDepositCatalogProducts(first, next), [
+    { _id: 'a' },
+    { _id: 'b' },
+    { _id: 'c' },
+  ]);
+  assert.deepEqual(appendDepositCatalogProducts(first, []), first);
 });

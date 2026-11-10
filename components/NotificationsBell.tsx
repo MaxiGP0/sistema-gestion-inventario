@@ -13,9 +13,15 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
+import { useVisibilityRefresh } from '@/hooks/useVisibilityRefresh';
 import { createVisibilityPoll } from '@/lib/visibility-poll';
 import { getRovingIndex, isRovingKey } from '@/lib/focus-trap';
 import { notificationMatchesInbox } from '@/lib/notification-inbox';
+import {
+  applyLiveNotification,
+  countUnreadNotifications,
+  parseNotificationEventPayload,
+} from '@/lib/notification-live';
 import { emitOrderNotification } from '@/lib/order-notification-events';
 import { resolveOrderHref } from '@/lib/notification-routing';
 import { useUser } from '@/context/UserContext';
@@ -192,10 +198,24 @@ export default function NotificationsBell({ currentRole = 'all' }: Notifications
   // Ref estable: el SSE siempre refresca con el filtro vigente sin reconectar
   // la conexión cada vez que cambia el rol seleccionado.
   const fetchNotificationsRef = useRef(fetchNotifications);
+  // Compartido por SSE, reconexión y regreso a foco para no duplicar el GET
+  // cuando varios eventos llegan casi juntos.
+  const lastRefreshAtRef = useRef(0);
 
   useEffect(() => {
     fetchNotificationsRef.current = fetchNotifications;
   }, [fetchNotifications]);
+
+  const refreshNotificationsNow = useCallback(() => {
+    lastRefreshAtRef.current = Date.now();
+    void fetchNotificationsRef.current();
+  }, []);
+
+  // Al volver a primer plano sólo se consulta si la pestaña estuvo oculta más
+  // de 30 s; un cambio rápido de app no dispara otra ráfaga de requests.
+  useVisibilityRefresh(() => {
+    if (notificationsEnabled) refreshNotificationsNow();
+  });
 
   useEffect(() => {
     selectedRoleFilterRef.current = selectedRoleFilter;
@@ -229,7 +249,7 @@ export default function NotificationsBell({ currentRole = 'all' }: Notifications
     let hadConnected = false;
     let source: EventSource | null = null;
     let connectionLimited = false;
-    let lastRefreshAt = 0;
+    let sessionExpired = false;
 
     const poll = createVisibilityPoll({
       intervalMs: POLL_FALLBACK_MS,
@@ -250,15 +270,11 @@ export default function NotificationsBell({ currentRole = 'all' }: Notifications
       safetyPoll.sync();
     };
 
-    const refreshNow = () => {
-      lastRefreshAt = Date.now();
-      fetchNotificationsRef.current();
-    };
-
     function closeSource() {
       if (!source) return;
 
       source.removeEventListener('connection-limit', handleConnectionLimit);
+      source.removeEventListener('session-expired', handleSessionExpired);
       source.onopen = null;
       source.onerror = null;
       source.onmessage = null;
@@ -276,8 +292,18 @@ export default function NotificationsBell({ currentRole = 'all' }: Notifications
       syncPolls();
     }
 
+    function handleSessionExpired() {
+      // El heartbeat del servidor detectó una baja, un reset o un cambio de
+      // rol. La cookie ya no es válida para la bandeja anterior: se cierra el
+      // SSE y se vuelve al login para reingresar con el rol correcto.
+      sessionExpired = true;
+      closeSource();
+      syncPolls();
+      router.replace('/login');
+    }
+
     const connect = () => {
-      if (source || connectionLimited || document.hidden) return;
+      if (source || connectionLimited || sessionExpired || document.hidden) return;
 
       const nextSource = new EventSource('/api/events');
       source = nextSource;
@@ -289,8 +315,8 @@ export default function NotificationsBell({ currentRole = 'all' }: Notifications
         syncPolls();
         // Puesta al día tras una reconexión. Si el handler de visibilidad ya
         // consultó hace un instante, se evita el request duplicado.
-        if (hadConnected && !document.hidden && Date.now() - lastRefreshAt > 1_000) {
-          refreshNow();
+        if (hadConnected && !document.hidden && Date.now() - lastRefreshAtRef.current > 1_000) {
+          refreshNotificationsNow();
         }
         hadConnected = true;
       };
@@ -330,13 +356,28 @@ export default function NotificationsBell({ currentRole = 'all' }: Notifications
             orderId: typeof data.orderId === 'string' && data.orderId ? data.orderId : null,
           });
 
-          if (!document.hidden) refreshNow();
+          // Camino rápido: el evento trae la notificación persistida y se
+          // inserta en la lista local. Sin GET por evento.
+          const payload = parseNotificationEventPayload(data.notification);
+          if (
+            payload &&
+            payload.targetRole === targetRole &&
+            notificationMatchesInbox(selectedRoleFilterRef.current, payload.targetRole)
+          ) {
+            setNotifications((prev) => applyLiveNotification(prev, payload));
+            return;
+          }
+
+          // Compatibilidad con servidores viejos o payload inválido: se pide
+          // la página completa como antes.
+          if (!document.hidden) refreshNotificationsNow();
         } catch {
           // Mensaje que no es JSON: ignorar.
         }
       };
 
       nextSource.addEventListener('connection-limit', handleConnectionLimit);
+      nextSource.addEventListener('session-expired', handleSessionExpired);
     };
 
     lastSeenEventIdRef.current = '';
@@ -353,9 +394,9 @@ export default function NotificationsBell({ currentRole = 'all' }: Notifications
         return;
       }
 
-      // De vuelta en primer plano: puesta al día, reapertura del SSE y
-      // reanudación de los intervalos que correspondan al estado actual.
-      refreshNow();
+      // De vuelta en primer plano: reapertura del SSE y reanudación de los
+      // intervalos. La puesta al día la decide useVisibilityRefresh con su
+      // umbral de 30 s.
       connect();
       syncPolls();
     };
@@ -368,7 +409,7 @@ export default function NotificationsBell({ currentRole = 'all' }: Notifications
       poll.stop();
       safetyPoll.stop();
     };
-  }, [notificationsEnabled]);
+  }, [notificationsEnabled, refreshNotificationsNow, router]);
 
   // Cerrar al hacer clic fuera en desktop
   useEffect(() => {
@@ -495,7 +536,7 @@ export default function NotificationsBell({ currentRole = 'all' }: Notifications
     if (nextIndex !== null) items[nextIndex].focus();
   };
 
-  const unreadCount = notifications.filter((n) => !n.read).length;
+  const unreadCount = countUnreadNotifications(notifications);
   // El número visible forma parte del nombre accesible (WCAG 2.5.3): si no,
   // axe detecta label-content-name-mismatch en la campana.
   const unreadAccessibleLabel =

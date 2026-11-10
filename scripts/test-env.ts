@@ -18,7 +18,7 @@ test('acepta MongoDB local y Atlas con un secreto suficientemente largo', () => 
   assert.equal(local.AUTH_SECRET, VALID_SECRET);
 
   const atlas = parseEnv({
-    MONGODB_URI: 'mongodb+srv://usuario:clave@cluster.mongodb.net/sistema-gestion-inventario',
+    MONGODB_URI: 'mongodb+srv://usuario:clave@cluster.mongodb.net/sgi',
     AUTH_SECRET: VALID_SECRET,
   });
   assert.match(atlas.MONGODB_URI, /^mongodb\+srv:\/\//);
@@ -48,11 +48,7 @@ test('falla si falta MONGODB_URI', () => {
 
 test('falla si MONGODB_URI no tiene un esquema de MongoDB', () => {
   assert.throws(
-    () =>
-      parseEnv({
-        MONGODB_URI: 'postgres://localhost/sistema-gestion-inventario',
-        AUTH_SECRET: VALID_SECRET,
-      }),
+    () => parseEnv({ MONGODB_URI: 'postgres://localhost/sgi', AUTH_SECRET: VALID_SECRET }),
     /MONGODB_URI debe empezar con mongodb:\/\//,
   );
 });

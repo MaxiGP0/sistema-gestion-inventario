@@ -27,18 +27,34 @@ import {
   clearPendingOrderRequests,
   deletePendingOrderRequest,
   enqueuePendingOrderCreate,
+  enqueuePendingOrderPut,
   getPendingOrderRequests,
   markPendingOrderRequestAttempt,
   markPendingOrderRequestFailed,
   resetPendingOrderRequest,
 } from '../lib/offline-order-queue';
-import { buildOrderDraftFromQueueEntry } from '../lib/offline-order-restore';
+import {
+  buildOrderDraftFromQueueEntry,
+  isDraftEditQueueEntry,
+  restoreOrderDraftFromQueueEntry,
+} from '../lib/offline-order-restore';
+import {
+  createOrderDraft,
+  getOrderDraftStorageKey,
+  loadOrderDraft,
+  saveOrderDraft,
+} from '../lib/order-draft';
+import {
+  getPendingOrderCommentStorageKey,
+  savePendingOrderComment,
+} from '../lib/pending-order-comment';
 import {
   buildPickingAutosaveFromOrderPut,
   getPickingAutosaveStorageKey,
   parsePickingAutosave,
   savePickingAutosave,
 } from '../lib/picking-autosave';
+import { clearUserOfflineData } from '../lib/pwa-client';
 import {
   isRetriableOrderPutStatus,
   processPendingOrderPuts,
@@ -355,6 +371,39 @@ test('un PUT rechazado se reconstruye como autosave sobre la versión vigente', 
   );
 });
 
+test('un fetch que nunca responde vence por timeout, marca el intento y corta el lote', async () => {
+  const entry = makeCreateEntry();
+  const { queue, attempts, adapter } = makeAdapter([entry]);
+  let receivedSignal: AbortSignal | undefined;
+
+  const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    receivedSignal = init?.signal ?? undefined;
+    // Simula una red colgada que ignora el abort: la promesa nunca resuelve.
+    return new Promise<Response>(() => {});
+  }) as typeof fetch;
+
+  const startedAt = Date.now();
+  const result = await processPendingOrderPuts(adapter, {
+    fetchImpl,
+    isOnline: () => true,
+    timeoutMs: 25,
+  });
+
+  assert.ok(Date.now() - startedAt < 1_000, 'el sync no debe quedar pendiente');
+  assert.equal(result.synced, 0);
+  assert.equal(result.pending, 1);
+  assert.equal(result.failed.length, 1);
+  assert.equal(result.failed[0].retryable, true);
+  assert.equal(result.failed[0].status, 0);
+  assert.match(result.failed[0].message, /tardó demasiado/i);
+  assert.equal(queue.size, 1, 'el pedido no debe perderse');
+  assert.equal(queue.get(entry.id)?.attempts, 1);
+  assert.match(queue.get(entry.id)?.lastError ?? '', /tardó demasiado/i);
+  assert.equal(attempts.length, 1);
+  assert.ok(receivedSignal, 'el fetch debe recibir una señal de timeout');
+  assert.equal(receivedSignal?.aborted, true);
+});
+
 test('un 5xx conserva el alta para el próximo reintento', async () => {
   const entry = makeCreateEntry();
   const { queue, adapter } = makeAdapter([entry]);
@@ -643,4 +692,128 @@ test('el indicador abre el detalle de la cola y el logout borra las entradas fal
 
   const pwaClient = await readFile(new URL('../lib/pwa-client.ts', import.meta.url), 'utf8');
   assert.match(pwaClient, /clearFailedPendingOrderRequests/);
+  assert.match(pwaClient, /PICKING_AUTOSAVE_STORAGE_KEY/);
+  assert.match(pwaClient, /PENDING_ORDER_COMMENT_STORAGE_KEY/);
+  assert.match(indicator, /Edición de borrador #/);
+
+  const editPage = await readFile(
+    new URL('../app/orders/[id]/edit/page.tsx', import.meta.url),
+    'utf8',
+  );
+  assert.match(editPage, /requireCurrentRolePage\(\['admin', 'vendedor'\]\)/);
+});
+
+test('un PUT de edición de borrador (mode: draft-edit) se distingue de picking y puede restaurarse en la clave de edición aislada', async () => {
+  await clearPendingOrderRequests();
+
+  const draftEditOrderId = '507f1f77bcf86cd799439088';
+  const entry = await enqueuePendingOrderPut({
+    orderId: draftEditOrderId,
+    url: `/api/orders/${draftEditOrderId}`,
+    body: {
+      mode: 'draft-edit',
+      version: 2,
+      items: [
+        {
+          productId: '507f1f77bcf86cd799439022',
+          requestedQuantity: 4,
+          customDiscount: 10,
+        },
+      ],
+      invoiceType: 'B',
+      paymentCondition: 'otro',
+      paymentConditionDetail: 'Cheque a 30 días',
+      comment: 'Ajuste offline de borrador',
+    },
+    clientName: 'Farmacia E2E',
+    total: 4200,
+  });
+
+  assert.equal(isDraftEditQueueEntry(entry), true);
+  assert.equal(isDraftEditQueueEntry(makeUpdateEntry()), false);
+
+  const values = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      values.set(key, value);
+    },
+    removeItem: (key: string) => {
+      values.delete(key);
+    },
+    values,
+  };
+
+  // Borrador de alta nueva activo en el mismo dispositivo.
+  const createDraft = createOrderDraft({
+    quantities: { 'prod-alta': 1 },
+    selectedClient: null,
+    salesperson: 'e2e-vendedor',
+    comment: 'Alta en curso',
+    itemDiscounts: {},
+    generalDiscount: 0,
+    brandDiscounts: {},
+    invoiceType: 'A',
+    paymentCondition: 'contado',
+    paymentConditionDetail: '',
+  });
+  saveOrderDraft(storage, createDraft, 'user-vendedor');
+
+  const restored = restoreOrderDraftFromQueueEntry(
+    {
+      userId: 'user-vendedor',
+      salesperson: 'e2e-vendedor',
+      knownClients: [{ _id: clientId, code: 'CLI-1', name: 'Farmacia E2E' }],
+      storage,
+    },
+    entry,
+  );
+  assert.equal(restored, true);
+
+  // Se guardó en la clave aislada de edición sin pisar el alta nueva.
+  assert.ok(storage.getItem(getOrderDraftStorageKey('user-vendedor', draftEditOrderId)));
+  assert.deepEqual(loadOrderDraft(storage, 'user-vendedor')?.quantities, { 'prod-alta': 1 });
+
+  const editDraft = loadOrderDraft(storage, 'user-vendedor', {
+    orderId: draftEditOrderId,
+    version: 3,
+  });
+  assert.ok(editDraft);
+  assert.deepEqual(editDraft.quantities, { '507f1f77bcf86cd799439022': 4 });
+  assert.deepEqual(editDraft.itemDiscounts, { '507f1f77bcf86cd799439022': 10 });
+  assert.equal(editDraft.invoiceType, 'B');
+  assert.equal(editDraft.paymentCondition, 'otro');
+  assert.equal(editDraft.paymentConditionDetail, 'Cheque a 30 días');
+  assert.equal(editDraft.comment, 'Ajuste offline de borrador');
+
+  // Al cerrar sesión se limpian los drafts (alta y edición), picking y comentarios.
+  savePickingAutosave(storage, {
+    orderId: draftEditOrderId,
+    userId: 'user-vendedor',
+    version: 3,
+    savedAt: Date.now(),
+    items: {
+      'linea-1': { verifiedQty: 4, controlled: true, pendingReason: '' },
+    },
+  });
+  savePendingOrderComment(storage, {
+    orderId: draftEditOrderId,
+    userId: 'user-vendedor',
+    text: 'Pendiente de enviar',
+    savedAt: Date.now(),
+  });
+
+  await clearUserOfflineData({ userId: 'user-vendedor', clearPendingOrders: true, storage });
+
+  assert.equal(storage.getItem(getOrderDraftStorageKey('user-vendedor')), null);
+  assert.equal(storage.getItem(getOrderDraftStorageKey('user-vendedor', draftEditOrderId)), null);
+  assert.equal(
+    storage.getItem(getPickingAutosaveStorageKey('user-vendedor', draftEditOrderId)),
+    null,
+  );
+  assert.equal(
+    storage.getItem(getPendingOrderCommentStorageKey('user-vendedor', draftEditOrderId)),
+    null,
+  );
+  assert.deepEqual(await getPendingOrderRequests(), []);
 });

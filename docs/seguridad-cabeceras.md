@@ -100,30 +100,60 @@ variantes en producción.
 **Requisito de despliegue:** producción debe servirse por HTTPS. Si se sirve por
 HTTP, el navegador descarta la cookie `Secure` y el login no persiste.
 
-## 5. Rate limit del login y multi-instancia
+## 5. Rate limit del login, endpoints caros y multi-instancia
 
-`lib/login-rate-limit.ts` sigue usando memoria del proceso. El comentario
-original y `docs/sse-notificaciones.md` describen el despliegue actual como un
-solo proceso Node, sin Redis (de hecho la estrategia multi-instancia de SSE se
-resolvió con polling de seguridad justamente para no sumar Redis).
+Hay dos stores de ventana fija en memoria del proceso:
 
-Con esa topología, el store en memoria alcanza. **Si el deploy pasa a varias
-instancias o serverless**, cada proceso tendría su propio contador y el límite
-de 5 intentos se multiplicaría por instancia. En ese caso hay que mover
-`isRateLimited` / `recordFailedAttempt` / `resetAttempts` a un store compartido:
+- `lib/login-rate-limit.ts`: intentos fallidos de login por IP y por usuario
+  (5 intentos / 15 min), con reset tras un login exitoso.
+- `lib/api-rate-limit.ts`: endpoints costosos, siempre con clave por usuario
+  autenticado (`consume(key, { limit, windowMs })`).
+
+| Endpoint | Límite | Clave |
+| --- | --- | --- |
+| `GET /api/orders/export` | 10/min | `orders-export:user:<userId>` |
+| `POST /api/catalog/import` | 5/min | `catalog-import:user:<userId>` |
+| `GET /api/orders?search=...` | 60/min | `orders-search:user:<userId>` |
+
+Al agotarse la ventana, la ruta responde **429** con `Retry-After` en segundos.
+El listado sin búsqueda no consume cupo: ya está acotado por `page`/`limit`.
+
+Ambos stores cuelgan de `globalThis` para sobrevivir al HMR de `next dev`.
+**Si el deploy pasa a varias instancias o serverless**, cada proceso tendría su
+propio contador y el límite efectivo se multiplicaría por instancia. En ese
+caso hay que reemplazar la implementación de `consume` por un adaptador
+compartido:
 
 - Redis con TTL por ventana (recomendado por latencia y operación simple), o
 - MongoDB (ya es dependencia) con upsert atómico por clave y TTL, aceptando el
-  costo de una escritura por intento fallido.
+  costo de una escritura por solicitud.
 
-La interfaz pública de `lib/login-rate-limit.ts` está aislada para que el
-cambio no toque la ruta de login.
+La interfaz de `lib/api-rate-limit.ts` está aislada para que el cambio no toque
+las rutas. El login puede migrarse al mismo adaptador manteniendo sus funciones
+públicas (`isRateLimited`, `recordFailedAttempt`, `resetAttempts`).
 
-## 6. Pruebas
+## 6. Confianza en cabeceras de proxy
+
+`TRUST_PROXY_HEADERS` vale `false` por defecto. En ese modo `getClientIp`
+(`lib/login-rate-limit.ts`) y `resolveClientIp` de SSE (`lib/client-ip.ts`)
+**ignoran** `x-forwarded-for` y `x-real-ip`: cualquier cliente puede inventarlas
+y usarlas para evadir el rate limit por IP. Se usa una IP desconocida y el
+límite por usuario autenticado sigue haciendo el trabajo.
+
+Activar `TRUST_PROXY_HEADERS=true` sólo cuando la app esté detrás de un proxy o
+balanceador propio que reescriba esas cabeceras. Con la variable en `true` se
+toma el primer salto de `x-forwarded-for` y, si falta, `x-real-ip`.
+
+## 7. Pruebas
 
 - `scripts/test-security.ts`: headers en dev/producción, rechazo 403 por
   `Origin` ajeno y `Sec-Fetch-Site: cross-site`, cookie `__Host-` y lectura de
   la variante legacy.
+- `scripts/test-api-hardening.ts`: schemas de listados, fechas inválidas,
+  recorte de tokens, `consume`, límites por endpoint y comportamiento de
+  `TRUST_PROXY_HEADERS=false` con un `x-forwarded-for` arbitrario.
+- `scripts/test-orders-export.ts` y `scripts/test-catalog-import.ts`: la
+  solicitud N+1 de export/import responde 429 con `Retry-After`.
 - `e2e/security-headers.spec.ts`: headers reales servidos por Next, login, SSE,
   `next/image` y tema sin violaciones CSP.
 - La suite E2E existente (`orders-flow`, `catalog`) sigue cubriendo el flujo

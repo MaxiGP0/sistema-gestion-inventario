@@ -31,11 +31,17 @@ Cada evento se emite con id estándar SSE:
 
 ```text
 id: 665f1f2a9b1e4c0012ab34cd
-data: {"type":"notification","targetRole":"deposit","orderId":"...","eventId":"665f1f2a9b1e4c0012ab34cd"}
+data: {"type":"notification","targetRole":"deposit","orderId":"...","eventId":"665f1f2a9b1e4c0012ab34cd","notification":{"id":"665f1f2a9b1e4c0012ab34cd","title":"Nuevo Pedido (Borrador)","message":"...","createdAt":"2026-01-01T12:00:00.000Z","targetRole":"deposit","orderId":"..."}}
 ```
 
 * El id es el `_id` de la `Notification` cuando se pudo persistir; si no, se
   genera un UUID.
+* `notification` viaja **solo** a las conexiones cuya bandeja coincide con el
+  `targetRole` del evento. Admin/global y otras bandejas reciben el mismo
+  evento sin esa carga y hacen el GET de respaldo. `NotificationsBell` usa el
+  payload para deduplicar por id e insertar arriba sin pedir la lista; si no
+  viene (servidores viejos) o la conexión se acaba de abrir/reconectar, hace el
+  GET completo como antes.
 * El servidor guarda un buffer acotado (`SSE_REPLAY_BUFFER_SIZE = 100`) por
   proceso. Si el navegador reconecta y envía `Last-Event-ID`, se reproducen
   solo los eventos posteriores que correspondan a la bandeja.
@@ -46,8 +52,13 @@ data: {"type":"notification","targetRole":"deposit","orderId":"...","eventId":"6
 * `EventSource` reenvía `Last-Event-ID` de forma nativa; el cliente además
   deduplica por `event.lastEventId`.
 
-El heartbeat es un comentario `: ping` cada `SSE_HEARTBEAT_MS = 25 s`. Si el
-`enqueue` falla, la conexión se elimina y se limpia su intervalo.
+El heartbeat es un comentario `: ping` cada `SSE_HEARTBEAT_MS = 25 s`. Antes de
+enviarlo revalida el estado actual del usuario con la misma caché de sesión que
+`requireCurrentSession` (`active`, `sessionVersion`, rol/bandeja). Si el usuario
+fue dado de baja, reseteó su contraseña, cambió de rol o su versión ya no
+coincide, la conexión recibe `event: session-expired` y se cierra; el cliente
+vuelve a `/login`. Si el `enqueue` falla, la conexión se elimina y se limpia su
+intervalo.
 
 ## 3. Límite de conexiones
 
@@ -73,13 +84,16 @@ Se eligió **(c) polling de seguridad cada 60 s aunque el SSE esté abierto**.
   pestaña está visible, incluso con SSE sano.
 * Las notificaciones persistidas en Mongo son la fuente de verdad. El SSE es
   solo una capa de baja latencia y puede perderse un evento si el proceso que
-  lo generó no es el mismo que atiende la conexión.
+  lo generó no es el mismo que atiende la conexión. Por eso el polling de
+  seguridad sigue activo y la campana no depende del payload para reconciliarse.
 * En pestañas ocultas no hay polling **ni conexión SSE**: al pasar a
   `document.hidden` se cierra el `EventSource` (evita también los reintentos
   automáticos del navegador) y al volver a primer plano se hace una consulta de
   puesta al día y se reabre el canal.
 * Si el servidor desaloja la conexión con `connection-limit` no se reintenta
   mientras dure la página; el respaldo de 10 s mantiene la bandeja al día.
+* Si recibe `session-expired`, cierra el canal y navega a `/login`: la cookie
+  firmada ya no representa al usuario/rol actual y hay que reingresar.
 
 **Por qué no (a) change streams:** requieren un replica set o mongos. El
 repositorio admite un MongoDB local standalone, donde un change stream falla.

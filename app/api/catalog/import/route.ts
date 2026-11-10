@@ -6,6 +6,12 @@ import { Product } from '@/models/Product';
 import { Client } from '@/models/Client';
 import { catalogImportSchema } from '@/lib/validations';
 import { errorResponse, handleRouteError, zodErrorResponse } from '@/lib/api-errors';
+import {
+  API_RATE_LIMIT_RULES,
+  apiRateLimitKey,
+  consume,
+  rateLimitResponse,
+} from '@/lib/api-rate-limit';
 import { revalidateCatalog } from '@/lib/catalog-cache';
 import type {
   CatalogImportPreviewResponse,
@@ -49,14 +55,14 @@ function isDryRunFlag(value: unknown): boolean {
   return ['1', 'true', 'on', 'yes', 'si', 'sí'].includes(value.trim().toLowerCase());
 }
 
-/** Índice de marcas existentes por clave normalizada (BAGO = Bagó). */
+/** Índice de marcas existentes por clave normalizada (DERMAPLUS = DermaPlus). */
 async function loadBrandIndex(): Promise<Map<string, BrandDocument>> {
   const brands = (await Brand.find({}, { name: 1 }).lean()) as unknown as BrandDocument[];
   const byKey = new Map<string, BrandDocument>();
 
   for (const brand of brands) {
     const key = normalizeBrandName(brand.name);
-    // Si ya había duplicados históricos (Bagó + BAGO), se usa el primero.
+    // Si ya había duplicados históricos (DermaPlus + DERMAPLUS), se usa el primero.
     if (!byKey.has(key)) byKey.set(key, brand);
   }
 
@@ -116,8 +122,8 @@ function findMissingBrands(
 
 /**
  * Crea las marcas faltantes con el nombre ya normalizado y recarga el índice.
- * Una segunda lectura normalizada evita duplicar "BAGO" si otra petición creó
- * "Bagó" en paralelo (el índice unique de Mongo es case-sensitive).
+ * Una segunda lectura normalizada evita duplicar "DERMAPLUS" si otra petición creó
+ * "DermaPlus" en paralelo (el índice unique de Mongo es case-sensitive).
  */
 async function createMissingBrands(
   names: string[],
@@ -214,9 +220,12 @@ async function upsertProducts(
     if (updateMode === 'both' || updateMode === 'name') {
       selectedFields.name = product.name;
       // bulkWrite no ejecuta los hooks del schema: las claves de búsqueda y el
-      // array de tokens se recalculan cuando cambia el nombre. En modo precio
-      // no se tocan.
-      Object.assign(selectedFields, buildProductSearchFields(product));
+      // array de tokens (código, nombre y marca) se recalculan cuando cambia el
+      // nombre. En modo precio no se tocan.
+      Object.assign(
+        selectedFields,
+        buildProductSearchFields({ ...product, brandName: brand.name }),
+      );
     }
     if (updateMode === 'both' || updateMode === 'price') {
       selectedFields.price = product.price;
@@ -298,6 +307,14 @@ export const POST = withRouteLogging(async (request: Request) => {
   try {
     const auth = await requireCurrentRole(request, ['admin']);
     if ('response' in auth) return auth.response;
+
+    // La importación lee hasta 5 MB / 5.000 filas: se corta por usuario antes
+    // de parsear el archivo o tocar la base.
+    const limitResult = consume(
+      apiRateLimitKey('catalog-import', auth.session.userId),
+      API_RATE_LIMIT_RULES.catalogImport,
+    );
+    if (!limitResult.allowed) return rateLimitResponse(limitResult);
 
     await dbConnect();
 

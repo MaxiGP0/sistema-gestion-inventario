@@ -7,6 +7,7 @@ import Button from '@/components/ui/Button';
 import QuantityStepper from '@/components/ui/QuantityStepper';
 import { cn } from '@/components/ui/cn';
 import { TableCell, TableRow } from '@/components/ui/Table';
+import { vibrateOnTap } from '@/lib/haptics';
 import {
   calculateLineSubtotal,
   resolveCardDiscount,
@@ -25,7 +26,7 @@ export interface CatalogProductRowProps {
 }
 
 const discountInputClasses =
-  'h-9 w-16 rounded-md border bg-field px-2 text-center text-xs font-semibold tabular-nums text-foreground outline-none transition-colors focus:border-focus focus:ring-2 focus:ring-focus/30';
+  'rounded-md border bg-field text-center font-semibold tabular-nums text-foreground outline-none transition-colors focus:border-focus focus:ring-2 focus:ring-focus/30';
 
 /**
  * Fila memoizada de la tabla de escritorio.
@@ -73,6 +74,7 @@ export const ProductRowDesktop = memo(function ProductRowDesktop({
             }
             className={cn(
               discountInputClasses,
+              'h-9 w-16 px-2 text-xs',
               hasOverride ? 'border-action ring-1 ring-action/30' : 'border-border-strong',
             )}
           />
@@ -146,17 +148,18 @@ export const ProductCardMobile = memo(function ProductCardMobile({
 
   return (
     <div
+      data-testid="order-catalog-product-card"
       className={cn(
         'cv-list-item cv-product-card rounded-lg border p-4 transition-colors',
         inCart ? 'border-action/60 bg-action-soft/25' : 'border-border bg-surface',
       )}
     >
-      <div className="mb-3 flex items-start gap-3">
+      <div className="flex items-start gap-3">
         <ProductThumbnail src={p.imageUrl} alt={p.name} size={48} className="shrink-0" />
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-2">
             <span className="font-mono text-xs text-subtle">{p.code}</span>
-            <div className="text-right">
+            <div className="shrink-0 text-right">
               <div className="text-xs font-semibold tabular-nums text-foreground">
                 ${p.price.toFixed(2)}{' '}
                 <span className="text-[10px] font-normal text-subtle">s/IVA</span>
@@ -167,26 +170,24 @@ export const ProductCardMobile = memo(function ProductCardMobile({
               </div>
             </div>
           </div>
-          <h4 className="mt-1 truncate text-sm font-semibold text-foreground">{p.name}</h4>
+          <h4 className="mt-1 line-clamp-2 break-words text-sm font-semibold leading-snug text-foreground">
+            {p.name}
+          </h4>
         </div>
       </div>
 
-      {inCart && (
-        <div
-          data-testid="catalog-in-cart-badge"
-          className="mb-3 flex items-center rounded-md border border-action/30 bg-surface/80 px-2.5 py-1.5 text-[11px] font-semibold text-action-text"
-        >
-          En carrito: {quantity} u. · ${lineTotal.toFixed(2)}
-        </div>
-      )}
-
-      <div className="space-y-3 border-t border-border pt-3">
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-xs font-medium text-muted">
-            Desc. {hasOverride && <span className="text-action-text">· manual</span>}
-          </span>
+      <div className="mt-2.5 flex flex-wrap items-center gap-2">
+        {inCart && (
+          <div
+            data-testid="catalog-in-cart-badge"
+            className="flex min-h-9 items-center rounded-md border border-action/30 bg-surface/80 px-2.5 py-1.5 text-[11px] font-semibold text-action-text"
+          >
+            En carrito: {quantity} u. · ${lineTotal.toFixed(2)}
+          </div>
+        )}
+        <div className="ml-auto shrink-0">
           {showDiscountInput ? (
-            <div className="relative shrink-0">
+            <div className="relative">
               <input
                 ref={discountInputRef}
                 type="number"
@@ -210,7 +211,7 @@ export const ProductCardMobile = memo(function ProductCardMobile({
                 }
                 className={cn(
                   discountInputClasses,
-                  'h-11 w-32 pr-10 text-center',
+                  'h-11 w-32 pr-10 text-base sm:text-xs',
                   hasOverride ? 'border-action ring-1 ring-action/30' : 'border-border-strong',
                 )}
               />
@@ -221,7 +222,7 @@ export const ProductCardMobile = memo(function ProductCardMobile({
                 onClick={handleDiscountClear}
                 title="Quitar ajuste manual y volver al descuento de la marca"
                 aria-label={`Volver al descuento de la marca para ${p.name}`}
-                className="absolute right-1 top-1/2 h-9 w-9 -translate-y-1/2"
+                className="absolute right-0.5 top-1/2 h-9 w-9 -translate-y-1/2 max-md:h-11 max-md:w-11"
               >
                 <X className="h-3.5 w-3.5" aria-hidden="true" />
               </Button>
@@ -240,42 +241,45 @@ export const ProductCardMobile = memo(function ProductCardMobile({
             </Button>
           )}
         </div>
+      </div>
 
-        <div>
-          <label className="mb-1 block text-xs font-medium text-muted">Cantidad</label>
-          <div className="flex items-center gap-2">
-            <QuantityStepper
-              value={quantity}
-              onChange={(value) => onQuantityChange(p._id, String(value))}
-              min={0}
-              max={99999}
-              label={`Cantidad en el catálogo de ${p.name}`}
-              decreaseLabel={`Restar una unidad del catálogo para ${p.name}`}
-              increaseLabel={`Sumar una unidad del catálogo para ${p.name}`}
-            />
-            <div className="grid flex-1 grid-cols-2 gap-2">
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={() => onQuantityDelta(p._id, 6)}
-                aria-label={`Sumar 6 unidades de ${p.name}`}
-                className="h-11 font-semibold"
-              >
-                +6
-              </Button>
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={() => onQuantityDelta(p._id, 12)}
-                aria-label={`Sumar 12 unidades de ${p.name}`}
-                className="h-11 font-semibold"
-              >
-                +12
-              </Button>
-            </div>
-          </div>
+      <div className="mt-2.5 flex items-center gap-2 border-t border-border pt-2.5">
+        <QuantityStepper
+          value={quantity}
+          onChange={(value) => onQuantityChange(p._id, String(value))}
+          min={0}
+          max={99999}
+          label={`Cantidad en el catálogo de ${p.name}`}
+          decreaseLabel={`Restar una unidad del catálogo para ${p.name}`}
+          increaseLabel={`Sumar una unidad del catálogo para ${p.name}`}
+        />
+        <div className="grid flex-1 grid-cols-2 gap-2">
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            onClick={() => {
+              vibrateOnTap();
+              onQuantityDelta(p._id, 6);
+            }}
+            aria-label={`Sumar 6 unidades de ${p.name}`}
+            className="h-11 font-semibold"
+          >
+            +6
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            onClick={() => {
+              vibrateOnTap();
+              onQuantityDelta(p._id, 12);
+            }}
+            aria-label={`Sumar 12 unidades de ${p.name}`}
+            className="h-11 font-semibold"
+          >
+            +12
+          </Button>
         </div>
       </div>
     </div>

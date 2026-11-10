@@ -1,5 +1,5 @@
 import { Suspense } from 'react';
-import { requireRolePage } from '@/lib/auth-page';
+import { requireCurrentRolePage } from '@/lib/auth-page';
 import { getBrands, getClientById, getClients, getProducts } from '@/lib/catalog';
 import { getOrderForSession } from '@/lib/services/order-read';
 import NewOrderClient from '@/components/orders/new/NewOrderClient';
@@ -40,8 +40,8 @@ async function NewOrderContent({
 }: {
   searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
 }) {
-  // Misma guarda que el proxy, repetida en la página (defensa en profundidad).
-  const session = await requireRolePage(['admin', 'vendedor']);
+  // Revalida el estado actual: una baja o un cambio de rol se aplica acá.
+  const session = await requireCurrentRolePage(['admin', 'vendedor']);
   const params = await searchParams;
   const fromOrderId = firstParam(params.fromOrder);
   const clientId = firstParam(params.clientId);

@@ -23,7 +23,7 @@ import InstallAppButton from '@/components/InstallAppButton';
 import StatusBadge from '@/components/StatusBadge';
 import Card from '@/components/ui/Card';
 import EmptyState from '@/components/ui/EmptyState';
-import { requireRolePage } from '@/lib/auth-page';
+import { requireCurrentRolePage } from '@/lib/auth-page';
 import { USER_ROLES, type UserRole } from '@/lib/authz';
 import {
   DASHBOARD_STATUS_LABELS,
@@ -290,7 +290,7 @@ export default function DashboardPage() {
 }
 
 async function DashboardContent() {
-  const session = await requireRolePage(USER_ROLES);
+  const session = await requireCurrentRolePage(USER_ROLES);
   const now = new Date();
   const metrics = await getDashboardMetrics(session, now);
 

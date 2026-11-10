@@ -23,6 +23,8 @@ interface OrderSummaryPanelProps {
   onQuantityChange: (productId: string, value: string) => void;
   onQuantityDelta: (productId: string, delta: number) => void;
   onRemoveItem: (productId: string) => void;
+  onDiscountChange: (productId: string, value: string) => void;
+  onDiscountClear: (productId: string) => void;
   loading: boolean;
   onSubmit: () => void;
   submitLabel?: string;
@@ -42,6 +44,8 @@ export default function OrderSummaryPanel({
   onQuantityChange,
   onQuantityDelta,
   onRemoveItem,
+  onDiscountChange,
+  onDiscountClear,
   loading,
   onSubmit,
   submitLabel = 'Guardar Pedido (Borrador)',
@@ -59,6 +63,8 @@ export default function OrderSummaryPanel({
         onQuantityChange={onQuantityChange}
         onQuantityDelta={onQuantityDelta}
         onRemoveItem={onRemoveItem}
+        onDiscountChange={onDiscountChange}
+        onDiscountClear={onDiscountClear}
         className="mb-4 max-h-80 overflow-y-auto overscroll-contain border-b border-border pb-4"
       />
 
@@ -74,7 +80,9 @@ export default function OrderSummaryPanel({
         </div>
         <div className="flex justify-between border-t border-border pt-2 text-base font-semibold text-foreground">
           <span>Total Final:</span>
-          <span className="tabular-nums">${finalTotal.toFixed(2)}</span>
+          <span data-testid="order-summary-final-total" className="tabular-nums">
+            ${finalTotal.toFixed(2)}
+          </span>
         </div>
       </div>
 

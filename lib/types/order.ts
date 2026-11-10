@@ -14,6 +14,8 @@ export interface OrderCommentDTO {
 
 /** Cliente embebido en el listado liviano de pedidos (populate parcial). */
 export interface OrderClientSummaryDTO {
+  /** Presente en el JSON de Mongoose aunque la proyección no lo enumere. */
+  _id?: string;
   code?: string;
   name?: string;
   localidad?: string;
@@ -107,12 +109,13 @@ export interface OrderDTO {
 }
 
 /**
- * Línea del listado liviano: sólo los snapshots y cantidades que necesita la
- * tarjeta para adelantar productos y detectar faltantes. Nunca incluye
- * `productId` poblado ni importes por línea.
+ * Línea del listado liviano: snapshots, cantidades y la referencia escalar al
+ * producto. `productId` nunca viene poblado ni incluye importes por línea, pero
+ * alcanza para repetir el pedido sin un segundo GET del detalle.
  */
 export interface OrderSummaryItemDTO {
   _id?: string;
+  productId?: string | null;
   productName?: string;
   productCode?: string;
   requestedQuantity?: number;
@@ -139,6 +142,8 @@ export interface OrderSummaryDTO {
   archived?: boolean;
   invoiceType?: InvoiceType;
   paymentCondition?: PaymentCondition;
+  /** Detalle de "Otro"; permite repetir el pedido sin el GET del detalle. */
+  paymentConditionDetail?: string;
   /** Sólo el último comentario: el listado no transporta el historial completo. */
   comments?: OrderCommentDTO[];
   items: OrderSummaryItemDTO[];

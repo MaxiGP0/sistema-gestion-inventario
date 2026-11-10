@@ -9,11 +9,14 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  MAX_IMAGE_URL_LENGTH,
   ORDER_STATUSES,
   canTransitionOrderStatus,
   clientSchema,
   createOrderSchema,
   getOrderStatusTransitionError,
+  normalizeImageUrlInput,
+  productSchema,
   updateOrderSchema,
 } from '../lib/validations';
 import { PUT as putOrder } from '../app/api/orders/[id]/route';
@@ -331,6 +334,75 @@ test('las transiciones de estado respetan el ciclo de vida', () => {
     'Transición de estado inválida: no se puede pasar de "entregado" a "facturacion"',
   );
   assert.equal(getOrderStatusTransitionError('borrador', 'paralizado'), null);
+});
+
+test('productSchema acepta imágenes vacías, rutas locales y HTTPS', () => {
+  const base = {
+    brandId: VALID_ID,
+    code: 'P1',
+    name: 'Producto',
+    price: 10,
+  };
+
+  for (const imageUrl of [
+    undefined,
+    '',
+    '   ',
+    '/uploads/producto.jpg',
+    'https://inventario.example.com/producto.jpg',
+  ]) {
+    const result = productSchema.safeParse({ ...base, imageUrl });
+    assert.equal(result.success, true, `debía aceptar ${JSON.stringify(imageUrl)}`);
+  }
+
+  const trimmed = productSchema.safeParse({ ...base, imageUrl: '  /uploads/foto.png  ' });
+  assert.equal(trimmed.success, true);
+  if (trimmed.success) assert.equal(trimmed.data.imageUrl, '/uploads/foto.png');
+});
+
+test('productSchema rechaza esquemas ejecutables, credenciales y URLs largas', () => {
+  const base = {
+    brandId: VALID_ID,
+    code: 'P1',
+    name: 'Producto',
+    price: 10,
+  };
+
+  const invalid = [
+    'javascript:alert(1)',
+    'data:image/png;base64,AAAA',
+    'blob:https://app.local/123',
+    'http://inventario.example.com/producto.jpg',
+    'https://user:secret@inventario.example.com/producto.jpg',
+    '//inventario.example.com/producto.jpg',
+    '/\\evil.example.net/producto.jpg',
+    'relative/foto.jpg',
+    `https://inventario.example.com/${'x'.repeat(MAX_IMAGE_URL_LENGTH)}`,
+  ];
+
+  for (const imageUrl of invalid) {
+    const result = productSchema.safeParse({ ...base, imageUrl });
+    assert.equal(result.success, false, `debía rechazar ${JSON.stringify(imageUrl)}`);
+  }
+
+  assert.equal(
+    productSchema.safeParse({
+      ...base,
+      imageUrl: `https://inventario.example.com/${'x'.repeat(MAX_IMAGE_URL_LENGTH)}`,
+    }).success,
+    false,
+  );
+});
+
+test('normalizeImageUrlInput distingue rutas locales de URLs externas', () => {
+  assert.equal(normalizeImageUrlInput(''), '');
+  assert.equal(normalizeImageUrlInput(' /uploads/foto.png '), '/uploads/foto.png');
+  assert.equal(
+    normalizeImageUrlInput('https://inventario.example.com/foto.png'),
+    'https://inventario.example.com/foto.png',
+  );
+  assert.equal(normalizeImageUrlInput('javascript:alert(1)'), null);
+  assert.equal(normalizeImageUrlInput('//evil.example.net/foto.png'), null);
 });
 
 test('PUT /api/orders/[id] responde 400 (no 500) ante datos inválidos', async () => {

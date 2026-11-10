@@ -9,10 +9,14 @@
  * Ejecutar con: npm test
  */
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 
 import { NextRequest } from 'next/server';
 
+import { User } from '../models/User';
+import { authorizeCurrentPageSession } from '../lib/auth-page';
+import { resetCurrentSessionCache } from '../lib/current-session-cache';
+import { PRIVATE_REVALIDATE_CACHE_CONTROL } from '../lib/cache-control';
 import {
   HSTS_VALUE,
   PERMISSIONS_POLICY_VALUE,
@@ -24,10 +28,12 @@ import {
   SESSION_TTL_SECONDS,
   buildSessionCookie,
   clearSessionCookies,
+  createSessionToken,
   readSessionToken,
   sessionCookieName,
   sessionCookieNames,
   sessionCookieOptions,
+  verifySessionToken,
 } from '../lib/session';
 import { proxy } from '../proxy';
 import { testSessionCookie } from './test-auth-utils';
@@ -66,6 +72,33 @@ test('los headers de seguridad están presentes en desarrollo', () => {
   assert.match(csp, /script-src[^;]*'unsafe-eval'/, 'dev necesita eval para React');
   assert.match(csp, /connect-src[^;]*ws:/, 'dev necesita WebSocket para HMR');
   assert.doesNotMatch(csp, /[\r\n]/, 'la CSP debe ser una sola línea');
+});
+
+test('las páginas permiten bfcache sin cachear datos privados', () => {
+  const pageResponse = proxy(
+    new NextRequest('http://localhost/', {
+      headers: { cookie: testSessionCookie('vendedor') },
+    }),
+  );
+  assert.equal(
+    pageResponse.headers.get('cache-control'),
+    PRIVATE_REVALIDATE_CACHE_CONTROL,
+    'el documento no debe llevar no-store para no descalificar bfcache',
+  );
+
+  const loginResponse = proxy(new NextRequest('http://localhost/login'));
+  assert.equal(loginResponse.headers.get('cache-control'), PRIVATE_REVALIDATE_CACHE_CONTROL);
+
+  const apiResponse = proxy(
+    new NextRequest('http://localhost/api/orders', {
+      headers: { cookie: testSessionCookie('vendedor') },
+    }),
+  );
+  assert.equal(
+    apiResponse.headers.get('cache-control'),
+    null,
+    'el proxy no debe pisar la política propia de cada GET de API',
+  );
 });
 
 test('en producción se agrega HSTS y se endurece la CSP', () => {
@@ -128,8 +161,8 @@ test('el proxy acepta mutaciones del mismo host y peticiones no mutantes', () =>
     mutationRequest(
       '/api/orders',
       {
-        origin: 'https://inventario.example.com.ar',
-        'x-forwarded-host': 'inventario.example.com.ar',
+        origin: 'https://sgi.example.com.ar',
+        'x-forwarded-host': 'sgi.example.com.ar',
         cookie: testSessionCookie('vendedor'),
       },
       'PUT',
@@ -234,4 +267,61 @@ test('las opciones de la cookie de desarrollo no fuerzan Secure', () => {
   assert.equal(options.httpOnly, true);
   assert.equal(options.path, '/');
   assert.ok(!('domain' in options));
+});
+
+// ---------------------------------------------------------------------------
+// Guarda de página con estado actual
+// ---------------------------------------------------------------------------
+
+test('la guarda de página usa el rol actual y no el firmado en la cookie', async (t) => {
+  const userId = '0000000000000000000000f1';
+  process.env.MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/fake-test';
+  (globalThis as any).mongoose = { conn: {}, promise: null };
+
+  let currentUser = {
+    _id: userId,
+    username: 'degradado',
+    role: 'vendedor',
+    active: true,
+    sessionVersion: 0,
+    notificationsEnabled: true,
+  };
+
+  const findById = mock.method(User as any, 'findById', () => {
+    const chain: any = {
+      select: () => chain,
+      lean: async () => (currentUser ? { ...currentUser } : null),
+    };
+    return chain;
+  });
+
+  t.after(() => {
+    resetCurrentSessionCache();
+    findById.mock.restore();
+  });
+
+  // Cookie firmada como admin, base con rol vendedor y misma versión.
+  const signed = verifySessionToken(
+    createSessionToken({
+      userId,
+      username: 'admin-cookie',
+      role: 'admin',
+      sessionVersion: 0,
+    }),
+  );
+  assert.ok(signed);
+
+  const backoffice = await authorizeCurrentPageSession(signed, ['admin']);
+  assert.equal(backoffice.status, 'forbidden', '/backoffice debe redirigir al panel');
+
+  const orders = await authorizeCurrentPageSession(signed, ['admin', 'vendedor']);
+  assert.equal(orders.status, 'ok');
+  assert.equal(orders.status === 'ok' && orders.session.role, 'vendedor');
+
+  // Una baja posterior a la firma invalida la sesión, aunque el rol coincida.
+  currentUser = { ...currentUser, active: false };
+  resetCurrentSessionCache();
+
+  const deactivated = await authorizeCurrentPageSession(signed, ['admin', 'vendedor']);
+  assert.equal(deactivated.status, 'login');
 });

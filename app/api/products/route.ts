@@ -1,36 +1,35 @@
 import { NextResponse } from 'next/server';
 import mongoose from 'mongoose';
 import dbConnect from '@/lib/mongodb';
-import { requireCurrentRole, requireSession } from '@/lib/auth';
+import { requireCurrentRole, requireCurrentSession } from '@/lib/auth';
 import { buildBrandSearchFilter, buildProductSearchFilter } from '@/lib/search-query';
+import { buildProductSearchFields } from '@/lib/search-normalize';
 import { Product } from '@/models/Product';
 import { Brand } from '@/models/Brand';
-import { productSchema } from '@/lib/validations';
-import { errorResponse, handleRouteError, parseJsonBody } from '@/lib/api-errors';
+import { productListQuerySchema, productSchema } from '@/lib/validations';
+import { errorResponse, handleRouteError, parseJsonBody, parseQueryParams } from '@/lib/api-errors';
 import { revalidateCatalog } from '@/lib/catalog-cache';
 import { catalogCacheHeaders } from '@/lib/catalog-http-cache';
 import type { ProductDTO, ProductListResponse, ProductMutationResponse } from '@/lib/types';
 import { withRouteLogging } from '@/lib/logger';
 
-const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 200;
 const MAX_IDS = 200;
 
 export const GET = withRouteLogging(async (request: Request) => {
   try {
-    const auth = requireSession(request);
+    const auth = await requireCurrentSession(request);
     if ('response' in auth) return auth.response;
 
-    await dbConnect();
+    const parsedQuery = parseQueryParams(request, productListQuerySchema);
+    if (!parsedQuery.success) return parsedQuery.response;
+
+    const { search = '', page, limit } = parsedQuery.data;
     const { searchParams } = new URL(request.url);
     const brandId = searchParams.get('brandId');
-    const search = (searchParams.get('search') || '').trim();
     const idsParam = (searchParams.get('ids') || '').trim();
-
-    const page = Math.max(1, parseInt(searchParams.get('page') || '1', 10) || 1);
-    const limitRaw = parseInt(searchParams.get('limit') || String(DEFAULT_LIMIT), 10);
-    const limit = Math.min(MAX_LIMIT, Math.max(1, isNaN(limitRaw) ? DEFAULT_LIMIT : limitRaw));
     const skip = (page - 1) * limit;
+
+    await dbConnect();
 
     const query: Record<string, unknown> = {};
 
@@ -53,14 +52,14 @@ export const GET = withRouteLogging(async (request: Request) => {
     }
 
     // Búsqueda por prefijo indexado en nombre/código y en el nombre normalizado
-    // de la marca. El fallback para documentos históricos queda en la consulta.
+    // de la marca. Los tokens de la marca ya viven en Product.searchTokens; las
+    // marcas resueltas quedan para el fallback de documentos históricos.
     if (search) {
       const brandFilter = buildBrandSearchFilter(search);
-      const matchingBrands = brandFilter ? await Brand.find(brandFilter).select('_id').lean() : [];
-      const searchFilter = buildProductSearchFilter(
-        search,
-        matchingBrands.map((brand) => brand._id),
-      );
+      const matchingBrands = brandFilter
+        ? await Brand.find(brandFilter).select('_id name').lean()
+        : [];
+      const searchFilter = buildProductSearchFilter(search, matchingBrands);
       if (searchFilter) Object.assign(query, searchFilter);
     }
 
@@ -113,12 +112,19 @@ export const POST = withRouteLogging(async (request: Request) => {
         ? Number(priceWithIva)
         : Number((numPrice * 1.21).toFixed(2));
 
+    const trimmedCode = code.trim();
+    const trimmedName = name.trim();
     const product = await Product.findOneAndUpdate(
-      { brandId, code: code.trim() },
+      { brandId, code: trimmedCode },
       {
         brandId,
-        code: code.trim(),
-        name: name.trim(),
+        code: trimmedCode,
+        name: trimmedName,
+        ...buildProductSearchFields({
+          code: trimmedCode,
+          name: trimmedName,
+          brandName: brand.name,
+        }),
         price: numPrice,
         priceWithIva: numPriceWithIva,
         imageUrl: imageUrl?.trim() || '',

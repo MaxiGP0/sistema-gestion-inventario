@@ -17,6 +17,7 @@ import {
 } from '@/lib/validations';
 import { isWebPushConfigured, sendWebPushNotification } from '@/lib/web-push';
 import { errorResponse, handleRouteError, parseJsonBody } from '@/lib/api-errors';
+import { PRIVATE_REVALIDATE_HEADERS } from '@/lib/cache-control';
 import type {
   PushSubscriptionDeleteResponse,
   PushSubscriptionListResponse,
@@ -77,7 +78,9 @@ export const GET = withRouteLogging(async (request: Request) => {
     await dbConnect();
 
     const subscriptions = await listSubscriptions(auth.session.userId);
-    return NextResponse.json(listResponse(subscriptions));
+    return NextResponse.json(listResponse(subscriptions), {
+      headers: PRIVATE_REVALIDATE_HEADERS,
+    });
   } catch (error: unknown) {
     return handleRouteError(error, { context: 'Error al listar suscripciones push:' });
   }

@@ -149,7 +149,6 @@ export function useOrderCursorList({
         });
 
         const data = await api.get<OrderCursorListResponse>(`/api/orders?${params.toString()}`, {
-          cache: 'no-store',
           signal: ticket.signal,
         });
 

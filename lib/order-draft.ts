@@ -23,9 +23,43 @@ import {
  */
 export const ORDER_DRAFT_STORAGE_KEY = 'sgi_order_draft';
 
-/** Clave de storage del borrador del usuario indicado. */
-export function getOrderDraftStorageKey(userId: string): string {
-  return `${ORDER_DRAFT_STORAGE_KEY}:${userId.trim()}`;
+/**
+ * Evento liviano para que la UI escuche los cambios del borrador sin polling.
+ * Se dispara en `saveOrderDraft` y `clearOrderDraft` sobre `window`.
+ */
+export const ORDER_DRAFT_CHANGED_EVENT = 'sgi:order-draft-changed';
+
+/** Un borrador de edición sin guardar deja de ofrecerse después de este tiempo (24 h). */
+export const ORDER_DRAFT_EDIT_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** Margen para tolerar relojes adelantados sin aceptar fechas absurdas. */
+const MAX_CLOCK_SKEW_MS = 60 * 1000;
+
+/**
+ * Clave de storage del borrador del usuario indicado. Cuando se pasa `orderId`
+ * (edición de un borrador existente), usa una clave aislada por pedido para no
+ * pisar nunca el borrador de alta nueva (`sgi_order_draft:${userId}`).
+ */
+export function getOrderDraftStorageKey(userId: string, orderId?: string | null): string {
+  const normalizedUserId = userId.trim();
+  const normalizedOrderId = typeof orderId === 'string' ? orderId.trim() : '';
+  if (normalizedOrderId) {
+    return `${ORDER_DRAFT_STORAGE_KEY}:${normalizedUserId}:edit:${normalizedOrderId}`;
+  }
+  return `${ORDER_DRAFT_STORAGE_KEY}:${normalizedUserId}`;
+}
+
+export interface OrderDraftScopeOptions {
+  /** Pedido en edición (`mode="edit"`). Si se omite, opera sobre el alta nueva. */
+  orderId?: string | null;
+  /** Versión del borrador cuando se empezó a editar; en lectura exige coincidencia si se indica. */
+  version?: number;
+  /** Epoch ms de guardado (por defecto `Date.now()`). */
+  savedAt?: number;
+  /** Epoch ms actual para validar el TTL de 24 h en lectura. */
+  now?: number;
+  /** TTL del borrador de edición (por defecto `ORDER_DRAFT_EDIT_TTL_MS`). */
+  ttlMs?: number;
 }
 
 const MAX_DISCOUNT = 100;
@@ -292,24 +326,125 @@ export function parseOrderDraft(raw: string | null): OrderDraft | null {
   };
 }
 
+function normalizeScopeOptions(
+  scope?: string | OrderDraftScopeOptions | null,
+): OrderDraftScopeOptions {
+  if (!scope) return {};
+  if (typeof scope === 'string') return { orderId: scope };
+  return scope;
+}
+
 /**
- * Clave efectiva o `null` si no hay un usuario válido. Sin usuario no se lee
- * ni se escribe el borrador: así nunca se cae a una clave compartida.
+ * Clave efectiva o `null` si no hay un usuario válido (o un `orderId` vacío
+ * cuando se pidió explícitamente modo edición). Sin usuario no se lee ni se
+ * escribe el borrador: así nunca se cae a una clave compartida.
  */
-function resolveStorageKey(userId: string | null | undefined): string | null {
+function resolveStorageKey(
+  userId: string | null | undefined,
+  scope?: string | OrderDraftScopeOptions | null,
+): string | null {
   if (typeof userId !== 'string' || !userId.trim()) return null;
+  const options = normalizeScopeOptions(scope);
+  if (options.orderId !== undefined && options.orderId !== null) {
+    if (typeof options.orderId !== 'string' || !options.orderId.trim()) return null;
+    return getOrderDraftStorageKey(userId, options.orderId);
+  }
   return getOrderDraftStorageKey(userId);
+}
+
+/** Avisa a la UI (p. ej. la barra móvil) que el borrador persistido cambió. */
+function notifyOrderDraftChanged(): void {
+  if (typeof window === 'undefined') return;
+
+  window.dispatchEvent(new Event(ORDER_DRAFT_CHANGED_EVENT));
+}
+
+function parseStoredOrderDraftEnvelope(raw: string | null): {
+  draft: OrderDraft;
+  savedAt?: number;
+  version?: number;
+  invalidMetadata: boolean;
+} | null {
+  const draft = parseOrderDraft(raw);
+  if (!draft || !raw) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) return null;
+
+  let savedAt: number | undefined;
+  let version: number | undefined;
+  let invalidMetadata = false;
+
+  if (parsed.savedAt !== undefined) {
+    if (typeof parsed.savedAt === 'number' && Number.isFinite(parsed.savedAt)) {
+      savedAt = Math.floor(parsed.savedAt);
+    } else {
+      invalidMetadata = true;
+    }
+  }
+
+  if (parsed.version !== undefined) {
+    if (
+      typeof parsed.version === 'number' &&
+      Number.isFinite(parsed.version) &&
+      parsed.version >= 0
+    ) {
+      version = Math.floor(parsed.version);
+    } else {
+      invalidMetadata = true;
+    }
+  }
+
+  return { draft, savedAt, version, invalidMetadata };
 }
 
 /** Lee el borrador del usuario indicado; un storage inaccesible cuenta como vacío. */
 export function loadOrderDraft(
   storage: OrderDraftStorage | null | undefined,
   userId: string | null | undefined,
+  scope?: string | OrderDraftScopeOptions | null,
 ): OrderDraft | null {
-  const key = resolveStorageKey(userId);
+  const options = normalizeScopeOptions(scope);
+  const key = resolveStorageKey(userId, options);
   if (!storage || !key) return null;
+
+  const isEditScope = Boolean(typeof options.orderId === 'string' && options.orderId.trim());
+
   try {
-    return parseOrderDraft(storage.getItem(key));
+    const raw = storage.getItem(key);
+    if (!isEditScope && options.version === undefined && options.ttlMs === undefined) {
+      return parseOrderDraft(raw);
+    }
+
+    const envelope = parseStoredOrderDraftEnvelope(raw);
+    if (!envelope || envelope.invalidMetadata) return null;
+
+    if (options.version !== undefined) {
+      if (
+        typeof options.version !== 'number' ||
+        !Number.isFinite(options.version) ||
+        options.version < 0
+      ) {
+        return null;
+      }
+      if (envelope.version !== undefined && envelope.version !== Math.floor(options.version)) {
+        return null;
+      }
+    }
+
+    if (envelope.savedAt !== undefined) {
+      const now = options.now ?? Date.now();
+      const ttlMs = options.ttlMs ?? ORDER_DRAFT_EDIT_TTL_MS;
+      if (envelope.savedAt > now + MAX_CLOCK_SKEW_MS) return null;
+      if (now - envelope.savedAt >= ttlMs) return null;
+    }
+
+    return envelope.draft;
   } catch {
     return null;
   }
@@ -320,11 +455,55 @@ export function saveOrderDraft(
   storage: OrderDraftStorage | null | undefined,
   draft: OrderDraft,
   userId: string | null | undefined,
+  scope?: string | OrderDraftScopeOptions | null,
 ): boolean {
-  const key = resolveStorageKey(userId);
-  if (!storage || !key) return false;
+  const options = normalizeScopeOptions(scope);
+  const key = resolveStorageKey(userId, options);
+  if (!storage || !key || !isRecord(draft)) return false;
+
+  const isEditScope = Boolean(typeof options.orderId === 'string' && options.orderId.trim());
+
   try {
-    storage.setItem(key, JSON.stringify(draft));
+    if (!isEditScope && options.version === undefined && options.savedAt === undefined) {
+      storage.setItem(key, JSON.stringify(draft));
+      notifyOrderDraftChanged();
+      return true;
+    }
+
+    if (options.version !== undefined) {
+      if (
+        typeof options.version !== 'number' ||
+        !Number.isFinite(options.version) ||
+        options.version < 0
+      ) {
+        return false;
+      }
+      const existing = parseStoredOrderDraftEnvelope(storage.getItem(key));
+      if (
+        existing &&
+        !existing.invalidMetadata &&
+        existing.version !== undefined &&
+        existing.version > Math.floor(options.version)
+      ) {
+        return false;
+      }
+    }
+
+    const savedAt =
+      typeof options.savedAt === 'number' && Number.isFinite(options.savedAt)
+        ? Math.floor(options.savedAt)
+        : typeof options.now === 'number' && Number.isFinite(options.now)
+          ? Math.floor(options.now)
+          : Date.now();
+
+    const payload = {
+      ...draft,
+      savedAt,
+      ...(options.version !== undefined ? { version: Math.floor(options.version) } : {}),
+    };
+
+    storage.setItem(key, JSON.stringify(payload));
+    notifyOrderDraftChanged();
     return true;
   } catch {
     return false;
@@ -335,11 +514,13 @@ export function saveOrderDraft(
 export function clearOrderDraft(
   storage: OrderDraftStorage | null | undefined,
   userId: string | null | undefined,
+  scope?: string | OrderDraftScopeOptions | null,
 ): boolean {
-  const key = resolveStorageKey(userId);
+  const key = resolveStorageKey(userId, scope);
   if (!storage || !key) return false;
   try {
     storage.removeItem(key);
+    notifyOrderDraftChanged();
     return true;
   } catch {
     return false;

@@ -1,6 +1,6 @@
 import { Suspense } from 'react';
 import OrderDetailSkeleton from '@/components/orders/OrderDetailSkeleton';
-import { requireRolePage } from '@/lib/auth-page';
+import { requireCurrentRolePage } from '@/lib/auth-page';
 import { initialOrderErrorForStatus } from '@/lib/order-initial-data';
 import { getOrderForSession } from '@/lib/services/order-read';
 import BillingOrderClient from './BillingOrderClient';
@@ -18,7 +18,7 @@ export default function BillingOrderPage({ params }: { params: Promise<{ id: str
 }
 
 async function BillingOrderContent({ params }: { params: Promise<{ id: string }> }) {
-  const session = await requireRolePage(['admin', 'billing']);
+  const session = await requireCurrentRolePage(['admin', 'billing']);
   const { id } = await params;
   const result = await getOrderForSession(session, id);
   const fetchedAt = result.ok ? result.fetchedAt : undefined;
@@ -26,6 +26,7 @@ async function BillingOrderContent({ params }: { params: Promise<{ id: string }>
   return (
     <BillingOrderClient
       orderId={id}
+      userId={session.userId}
       role={session.role}
       username={session.username}
       initialOrder={result.ok ? result.order : null}

@@ -6,8 +6,9 @@
  * espacios colapsados. `searchTokens` guarda, además, las palabras únicas de
  * esos campos en un array multikey: permite exigir que todos los tokens de una
  * consulta coincidan por prefijo aunque estén en cualquier posición del texto.
- * Así "ahorro" o "super ahorro" encuentran "Supermercado El Ahorro" y
- * "shampoo 400" encuentra "Shampoo Capitalis 400ml".
+ * Así "ahorro" o "super ahorro" encuentran "Supermercado El Ahorro",
+ * "shampoo 400" encuentra "Shampoo NovaFarma 400ml" y "biosalud 400" encuentra
+ * un producto de BioSalud cuyo nombre no repite la marca.
  *
  * La normalización se aplica tanto al documento como al término buscado, por lo
  * que "GÓMEZ", "gomez" y "Gómez" producen la misma clave.
@@ -74,14 +75,29 @@ export interface ProductSearchFields extends Record<string, SearchFieldValue> {
   searchTokens: string[];
 }
 
+/**
+ * Clave de búsqueda de un producto: código, nombre y nombre de marca.
+ *
+ * El nombre de la marca puede llegar explícito (`brandName`) o embebido en un
+ * `brandId` poblado (`{ name }`). Así "biosalud 400" encuentra el producto por el
+ * índice multikey aunque el nombre comercial no mencione la marca.
+ */
 export function buildProductSearchFields(input: {
   code?: unknown;
   name?: unknown;
+  brandName?: unknown;
+  brandId?: unknown;
 }): ProductSearchFields {
+  const populatedBrand =
+    input.brandId && typeof input.brandId === 'object'
+      ? (input.brandId as { name?: unknown }).name
+      : undefined;
+  const brandName = input.brandName ?? populatedBrand;
+
   return {
     searchName: normalizeSearchText(input.name),
     searchCode: normalizeSearchText(input.code),
-    searchTokens: tokenizeSearchText(input.code, input.name),
+    searchTokens: tokenizeSearchText(input.code, input.name, brandName),
   };
 }
 

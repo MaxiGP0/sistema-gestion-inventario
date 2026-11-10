@@ -6,10 +6,11 @@
  * desde otro contexto sin pasar por el proxy).
  *
  * `requireSession` y `requireRole` se resuelven solo con las claims firmadas
- * (sin tocar Mongo), así que un 401/403 nunca depende de la base de datos.
- * Para escrituras se usa `requireCurrentSession`, que lee `active`,
- * `sessionVersion` y `role` actuales (con caché corto) para que una baja, un
- * cambio de rol o un reset de contraseña invaliden la sesión sin esperar 8 h.
+ * (sin tocar Mongo), así que un 401/403 básico nunca depende de la base. Las
+ * escrituras, las lecturas sensibles y las páginas usan `requireCurrentSession`
+ * / `requireCurrentRolePage`, que leen `active`, `sessionVersion` y `role`
+ * actuales (con caché corto) para que una baja, un cambio de rol o un reset de
+ * contraseña invaliden la sesión sin esperar 8 h.
  */
 
 import { cookies } from 'next/headers';
@@ -127,6 +128,27 @@ function staleSessionResponse(): NextResponse {
 }
 
 /**
+ * Contrasta una sesión firmada con el estado actual del usuario.
+ *
+ * Devuelve el snapshot vigente o `null` si el usuario no existe, está inactivo
+ * o su `sessionVersion` cambió. Comparte la caché de 30-60 s con
+ * `requireCurrentSession` y `requireCurrentRolePage`, así que las páginas y las
+ * lecturas aplican una baja/cambio de rol con el mismo costo que una escritura.
+ */
+export async function resolveCurrentSessionUser(
+  signed: SessionPayload,
+): Promise<CurrentSessionSnapshot | null> {
+  const currentUser = await loadCurrentUser(signed.userId);
+
+  if (!currentUser || !currentUser.active || currentUser.sessionVersion !== signed.sessionVersion) {
+    if (!currentUser) invalidateCurrentSessionCache(signed.userId);
+    return null;
+  }
+
+  return currentUser;
+}
+
+/**
  * Sesión firmada + estado actual del usuario.
  *
  * Devuelve 401 y borra la cookie si el usuario ya no existe, fue desactivado o
@@ -137,12 +159,8 @@ export async function requireCurrentSession(request: Request): Promise<AuthResul
   const signed = getRequestSession(request);
   if (!signed) return { response: unauthorizedResponse() };
 
-  const currentUser = await loadCurrentUser(signed.userId);
-
-  if (!currentUser || !currentUser.active || currentUser.sessionVersion !== signed.sessionVersion) {
-    if (!currentUser) invalidateCurrentSessionCache(signed.userId);
-    return { response: staleSessionResponse() };
-  }
+  const currentUser = await resolveCurrentSessionUser(signed);
+  if (!currentUser) return { response: staleSessionResponse() };
 
   return {
     session: {

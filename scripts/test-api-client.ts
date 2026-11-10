@@ -17,10 +17,12 @@ import {
   api,
   apiRequest,
   ApiClientError,
+  API_TIMEOUT_MESSAGE,
   cancelRequest,
   createAbortController,
   isAbortError,
   isNetworkError,
+  isTimeoutError,
 } from '../lib/api-client';
 
 type FetchCall = { url: string; init?: RequestInit };
@@ -239,12 +241,69 @@ test('reenvía el signal y propaga AbortError sin envolverlo como error de red',
   cancelRequest(controller);
 
   await assert.rejects(pending, (error: unknown) => {
-    assert.equal(calls[0].init?.signal, controller.signal);
+    // Con timeout activo la señal enviada es la combinada, no la original.
+    assert.ok(calls[0].init?.signal instanceof AbortSignal);
+    assert.equal(calls[0].init?.signal?.aborted, true);
     assert.equal(isAbortError(error), true);
     assert.equal(error instanceof ApiClientError, false);
     assert.equal(isNetworkError(error), false);
+    assert.equal(isTimeoutError(error), false);
     return true;
   });
+});
+
+test('un fetch que nunca responde vence por timeout y se marca como error de red', async (t) => {
+  stubFetch(t, () => new Promise<Response>(() => {}));
+
+  const startedAt = Date.now();
+
+  await assert.rejects(
+    () => api.get('/api/orders', { timeoutMs: 25 }),
+    (error: unknown) => {
+      assert.ok(error instanceof ApiClientError);
+      assert.equal(error.message, API_TIMEOUT_MESSAGE);
+      assert.equal(error.status, 0);
+      assert.equal(error.isNetworkError, true);
+      assert.equal(error.isTimeout, true);
+      assert.equal(isNetworkError(error), true);
+      assert.equal(isTimeoutError(error), true);
+      return true;
+    },
+  );
+
+  assert.ok(Date.now() - startedAt < 1_000, 'el timeout debe resolver rápido, no colgarse');
+});
+
+test('timeoutMs 0 desactiva el timer y conserva la señal externa', async (t) => {
+  const controller = createAbortController();
+  const calls = stubFetch(
+    t,
+    () =>
+      new Promise<Response>((_resolve, reject) => {
+        controller.signal.addEventListener('abort', () => reject(controller.signal.reason), {
+          once: true,
+        });
+      }),
+  );
+
+  const pending = api.get('/api/clients', {
+    signal: controller.signal,
+    timeoutMs: 0,
+  });
+
+  const outcome = await Promise.race([
+    pending.then(
+      () => 'resolved',
+      () => 'rejected',
+    ),
+    new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 50)),
+  ]);
+
+  assert.equal(outcome, 'pending', 'sin timeout la petición sigue en curso');
+  assert.equal(calls[0].init?.signal, controller.signal, 'no se crea una señal combinada');
+
+  cancelRequest(controller);
+  await assert.rejects(pending, (error: unknown) => isAbortError(error));
 });
 
 test('cancelRequest es idempotente y respeta el motivo original', () => {
@@ -270,4 +329,19 @@ test('isNetworkError solo reconoce ApiClientError de red', () => {
     true,
   );
   assert.equal(isNetworkError(new ApiClientError('servidor', { status: 500 })), false);
+});
+
+test('isTimeoutError sólo reconoce el vencimiento del timeout', () => {
+  assert.equal(isTimeoutError(new Error('x')), false);
+  assert.equal(isTimeoutError(null), false);
+  assert.equal(
+    isTimeoutError(
+      new ApiClientError('timeout', { status: 0, isNetworkError: true, isTimeout: true }),
+    ),
+    true,
+  );
+  assert.equal(
+    isTimeoutError(new ApiClientError('sin red', { status: 0, isNetworkError: true })),
+    false,
+  );
 });

@@ -1,11 +1,6 @@
 import { NextResponse } from 'next/server';
 import dbConnect from '@/lib/mongodb';
-import {
-  forbiddenResponse,
-  requireCurrentRole,
-  requireCurrentSession,
-  requireSession,
-} from '@/lib/auth';
+import { forbiddenResponse, requireCurrentRole, requireCurrentSession } from '@/lib/auth';
 import { canUpdateOrder, resolveUserRole } from '@/lib/authz';
 import { canReadOrder } from '@/lib/order-access';
 import { Order } from '@/models/Order';
@@ -16,6 +11,7 @@ import { objectIdSchema, updateOrderSchema } from '@/lib/validations';
 import { publishOrderNotification } from '@/lib/order-side-effects';
 import { runAfterResponse } from '@/lib/after-response';
 import { errorResponse, handleRouteError, parseJsonBody } from '@/lib/api-errors';
+import { PRIVATE_REVALIDATE_HEADERS } from '@/lib/cache-control';
 import { getOrderForSession } from '@/lib/services/order-read';
 import {
   applyOrderUpdatePlan,
@@ -42,7 +38,7 @@ function serviceErrorResponse(error: OrderServiceError) {
 export const GET = withRouteLogging(
   async (request: Request, { params }: { params: Promise<{ id: string }> }) => {
     try {
-      const auth = requireSession(request);
+      const auth = await requireCurrentSession(request);
       if ('response' in auth) return auth.response;
 
       const { id } = await params;
@@ -58,7 +54,7 @@ export const GET = withRouteLogging(
         success: true,
         order: result.order,
       };
-      return NextResponse.json(response);
+      return NextResponse.json(response, { headers: PRIVATE_REVALIDATE_HEADERS });
     } catch (error: unknown) {
       return handleRouteError(error, { context: 'Error al obtener pedido:' });
     }

@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { ChevronLeft, ChevronRight, Search, Users, X } from 'lucide-react';
 import AppShell from '@/components/app-shell/AppShell';
 import OfflineCatalogBadge from '@/components/orders/new/OfflineCatalogBadge';
+import OfflineCatalogSyncProgress from '@/components/orders/new/OfflineCatalogSyncProgress';
 import Button from '@/components/ui/Button';
 import Card from '@/components/ui/Card';
 import {
@@ -18,6 +19,8 @@ import {
   TableRow,
 } from '@/components/ui/Table';
 import { useUser } from '@/context/UserContext';
+import { useCatalogFocusRevalidation } from '@/hooks/useCatalogFocusRevalidation';
+import { useUrlSearchSync } from '@/hooks/useUrlSearchSync';
 import type { UserRole } from '@/lib/authz';
 import { CLIENTS_PAGE_SIZE } from '@/lib/catalog-pagination';
 import { countSelectedItems } from '@/lib/order-catalog';
@@ -25,10 +28,9 @@ import { loadOrderDraft, type OrderDraftStorage } from '@/lib/order-draft';
 import { searchOfflineCatalogClients } from '@/lib/offline-catalog';
 import {
   isBrowserOffline,
-  prefetchOfflineCatalogClients,
-  prefetchOfflineCatalogProducts,
   rememberOfflineCatalogBrands,
   rememberOfflineCatalogClients,
+  syncOfflineCatalog,
 } from '@/lib/offline-catalog-sync';
 import type { BrandDTO, ClientDTO } from '@/lib/types';
 import CatalogTabs from '../CatalogTabs';
@@ -136,6 +138,18 @@ export default function ClientsBrowser({
   const totalPages = offlinePage ? offlinePage.totalPages : serverTotalPages;
   const busy = isPending || offlineLoading;
 
+  /** Delta liviano del snapshot offline al reconectar o volver a foco. */
+  const requestAutoCatalogSync = useCallback(() => {
+    if (!userId || isOffline || isBrowserOffline()) return;
+
+    void syncOfflineCatalog(userId, { auto: true }).catch((error) => {
+      if (error instanceof Error && error.name === 'AbortError') return;
+      console.warn('No se pudo sincronizar el catálogo offline:', error);
+    });
+  }, [isOffline, userId]);
+
+  useCatalogFocusRevalidation(requestAutoCatalogSync);
+
   /** Resuelve una página de clientes contra el snapshot local. */
   const loadLocalPage = useCallback(
     async (targetPage: number, term: string) => {
@@ -180,11 +194,13 @@ export default function ClientsBrowser({
     [userId],
   );
 
-  // Mantiene el input alineado con la URL (atrás/adelante, refresh del server).
-  useEffect(() => {
-    if (isOffline) return;
-    setSearch(initialSearch);
-  }, [initialSearch, isOffline]);
+  // Mantiene el input alineado con la URL (atrás/adelante, refresh del server)
+  // sin borrar los caracteres escritos mientras la navegación está en curso.
+  const markSearchCommitted = useUrlSearchSync({
+    serverValue: initialSearch,
+    setValue: setSearch,
+    enabled: !isOffline,
+  });
 
   // Detecta la falta de red y pasa a resolver búsqueda/paginación localmente.
   useEffect(() => {
@@ -229,6 +245,7 @@ export default function ClientsBrowser({
       if (!navigator.onLine) return;
       setIsOffline(false);
       setOfflinePage(null);
+      requestAutoCatalogSync();
       startTransition(() => router.refresh());
     };
 
@@ -241,7 +258,7 @@ export default function ClientsBrowser({
       window.removeEventListener('offline', handleOffline);
       window.removeEventListener('online', handleOnline);
     };
-  }, [router]);
+  }, [requestAutoCatalogSync, router]);
 
   useEffect(() => {
     if (!isOffline) return;
@@ -267,21 +284,23 @@ export default function ClientsBrowser({
   }, [userId, isOffline, initialClients, brands]);
 
   // La primera página del SSR no alcanza para el modo offline: después de la
-  // pintura se completa el catálogo de clientes y productos en segundo plano.
+  // pintura se completa el catálogo con full sync y, en visitas siguientes,
+  // sólo con deltas.
   useEffect(() => {
     if (!userId || isOffline) return;
 
+    const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      if (isBrowserOffline()) return;
-      void prefetchOfflineCatalogClients(userId).catch((error) => {
-        console.warn('No se pudo precargar el catálogo de clientes offline:', error);
-      });
-      void prefetchOfflineCatalogProducts(userId).catch((error) => {
-        console.warn('No se pudo precargar el catálogo de productos offline:', error);
+      void syncOfflineCatalog(userId, { auto: true, signal: controller.signal }).catch((error) => {
+        if (error instanceof Error && error.name === 'AbortError') return;
+        console.warn('No se pudo sincronizar el catálogo offline:', error);
       });
     }, 2_500);
 
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
   }, [userId, isOffline]);
 
   // Búsqueda con debounce: con red la consulta real la hace el Server Component.
@@ -293,6 +312,7 @@ export default function ClientsBrowser({
 
     const timer = setTimeout(
       () => {
+        markSearchCommitted(trimmed);
         startTransition(() => {
           router.replace(buildClientsUrl(1, trimmed));
         });
@@ -301,7 +321,7 @@ export default function ClientsBrowser({
     );
 
     return () => clearTimeout(timer);
-  }, [search, initialSearch, router, isOffline]);
+  }, [search, initialSearch, router, isOffline, markSearchCommitted]);
 
   const goToPage = (targetPage: number) => {
     if (targetPage < 1 || targetPage > totalPages || targetPage === page) return;
@@ -311,6 +331,7 @@ export default function ClientsBrowser({
       return;
     }
 
+    markSearchCommitted(search);
     startTransition(() => {
       router.push(buildClientsUrl(targetPage, search.trim()));
     });
@@ -346,6 +367,7 @@ export default function ClientsBrowser({
       pageDescription="Clientes, direcciones y descuentos del catálogo."
     >
       <CatalogTabs active="clients" />
+      <OfflineCatalogSyncProgress className="mb-4" />
       {isOffline && <OfflineCatalogBadge className="mb-4" detail="catálogo de clientes" />}
       <Card className="flex flex-col">
         <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
@@ -404,7 +426,7 @@ export default function ClientsBrowser({
               clients.map((client) => (
                 <div
                   key={`mob-${client._id}`}
-                  className="space-y-3 rounded-lg border border-border bg-surface-muted p-3"
+                  className="cv-list-item cv-client-card space-y-3 rounded-lg border border-border bg-surface-muted p-3"
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">

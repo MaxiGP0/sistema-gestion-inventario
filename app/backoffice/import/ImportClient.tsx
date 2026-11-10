@@ -8,7 +8,7 @@ import Button from '@/components/ui/Button';
 import Card from '@/components/ui/Card';
 import Radio from '@/components/ui/Radio';
 import { useToast } from '@/context/ToastContext';
-import { api } from '@/lib/api-client';
+import { api, LONG_REQUEST_TIMEOUT_MS } from '@/lib/api-client';
 import { invalidateCatalogCache } from '@/lib/catalog-query-cache';
 import type {
   CatalogImportPreviewResponse,
@@ -86,7 +86,9 @@ export default function ImportClient() {
     if (type === 'products') formData.append('updateMode', updateMode);
 
     try {
-      const data = await api.post<CatalogImportPreviewResponse>('/api/catalog/import', formData);
+      const data = await api.post<CatalogImportPreviewResponse>('/api/catalog/import', formData, {
+        timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+      });
       setPreview(data);
     } catch (err: unknown) {
       const error = err as Error;
@@ -108,7 +110,9 @@ export default function ImportClient() {
     if (type === 'products') formData.append('updateMode', updateMode);
 
     try {
-      const data = await api.post<CatalogImportResponse>('/api/catalog/import', formData);
+      const data = await api.post<CatalogImportResponse>('/api/catalog/import', formData, {
+        timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+      });
       showToast(data.message || 'Importación completada exitosamente', 'success');
       invalidateCatalogCache('products', 'brands', 'clients');
       resetSelection();

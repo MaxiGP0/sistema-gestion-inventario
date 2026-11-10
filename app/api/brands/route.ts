@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import dbConnect from '@/lib/mongodb';
-import { requireCurrentRole, requireSession } from '@/lib/auth';
+import { requireCurrentRole, requireCurrentSession } from '@/lib/auth';
 import { Brand } from '@/models/Brand';
 import { brandSchema } from '@/lib/validations';
 import { handleRouteError, parseJsonBody } from '@/lib/api-errors';
@@ -11,7 +11,7 @@ import { withRouteLogging } from '@/lib/logger';
 
 export const GET = withRouteLogging(async (request: Request) => {
   try {
-    const auth = requireSession(request);
+    const auth = await requireCurrentSession(request);
     if ('response' in auth) return auth.response;
 
     await dbConnect();

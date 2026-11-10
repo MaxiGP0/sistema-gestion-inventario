@@ -3,6 +3,7 @@
 import { Minus, Plus } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import { cn } from '@/components/ui/cn';
+import { vibrateOnTap } from '@/lib/haptics';
 
 export interface QuantityStepperProps {
   value: number;
@@ -45,6 +46,12 @@ export default function QuantityStepper({
     onChange(clamp(next, min, max));
   };
 
+  /** Los botones -/+ confirman el toque con haptics; escribir no vibra. */
+  const stepBy = (delta: number) => {
+    vibrateOnTap();
+    update(clampedValue + delta);
+  };
+
   const handleInput = (raw: string) => {
     const digits = raw.replace(/[^\d]/g, '');
     update(digits ? Number.parseInt(digits, 10) : min);
@@ -63,7 +70,7 @@ export default function QuantityStepper({
         variant="ghost"
         size="icon-sm"
         className="rounded-none border-r border-border"
-        onClick={() => update(clampedValue - step)}
+        onClick={() => stepBy(-step)}
         disabled={!canDecrease}
         aria-label={decreaseLabel}
       >
@@ -91,7 +98,7 @@ export default function QuantityStepper({
         variant="ghost"
         size="icon-sm"
         className="rounded-none border-l border-border"
-        onClick={() => update(clampedValue + step)}
+        onClick={() => stepBy(step)}
         disabled={!canIncrease}
         aria-label={increaseLabel}
       >
