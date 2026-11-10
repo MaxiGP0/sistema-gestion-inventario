@@ -42,8 +42,9 @@ export default function MobileNavSheet({ open, onClose, role }: MobileNavSheetPr
       className="max-h-[85dvh]"
     >
       <div className="flex items-center justify-between gap-3 border-b border-border pb-4">
-        <Link href="/" onClick={onClose} aria-label="Ir al panel" className="inline-flex">
+        <Link href="/" onClick={onClose} className="inline-flex">
           <BrandWordmark className="h-8 w-auto" />
+          <span className="sr-only">Ir al panel</span>
         </Link>
         <Button variant="ghost" size="icon" onClick={onClose} aria-label="Cerrar menú">
           <X className="h-5 w-5" aria-hidden="true" />

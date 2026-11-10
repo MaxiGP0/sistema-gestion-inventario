@@ -21,8 +21,9 @@ export default function AppSidebar({ role }: AppSidebarProps) {
   return (
     <aside className="sticky top-0 hidden h-dvh w-60 shrink-0 flex-col border-r border-border bg-surface md:flex">
       <div className="flex h-16 shrink-0 items-center px-5">
-        <Link href="/" aria-label="Ir al panel" className="inline-flex">
+        <Link href="/" className="inline-flex">
           <BrandWordmark className="h-9 w-auto" />
+          <span className="sr-only">Ir al panel</span>
         </Link>
       </div>
 
