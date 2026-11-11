@@ -64,18 +64,15 @@ export function createRequestTimeout(
     listeners.push([signal, listener]);
   };
 
-  let timeoutSignal: AbortSignal;
-
-  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
-    timeoutSignal = AbortSignal.timeout(timeoutMs);
-  } else {
-    const controller = new AbortController();
-    timer = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, timeoutMs);
-    timeoutSignal = controller.signal;
-  }
+  // No se usa `AbortSignal.timeout`: en Node su timer queda `unref()`, así que
+  // el proceso puede vaciar el event loop y abortar la espera antes de vencer
+  // (por ejemplo, un fetch colgado sin otra actividad pendiente).
+  const controller = new AbortController();
+  timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  const timeoutSignal = controller.signal;
 
   // Se registra antes de combinar para que `timedOut()` ya sea true cuando el
   // fetch rechace por el aborto.
