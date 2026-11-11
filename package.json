@@ -55,7 +55,7 @@
     "bcryptjs": "^3.0.3",
     "exceljs": "^4.4.0",
     "lucide-react": "^1.55.0",
-    "mongoose": "^9.11.1",
+    "mongoose": "^9.12.1",
     "next": "16.4.2",
     "react": "19.3.0",
     "react-dom": "19.3.0",
