@@ -11,6 +11,12 @@
     "type": "git",
     "url": "https://github.com/MaxiGP0/sistema-gestion-inventario.git"
   },
+  "contributors": [
+    {
+      "name": "Máximo Gómez Pessoa",
+      "url": "https://www.linkedin.com/in/maximo-gomez-pessoa/"
+    }
+  ],
   "private": true,
   "scripts": {
     "dev": "next dev",
